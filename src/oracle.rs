@@ -265,7 +265,7 @@ mod tests {
                     assert!(!succs.is_empty(), "Loss({d}) with d>0 must have moves: {s:?}");
                     let all_win = succs.iter().all(|succ| {
                         succ.white_count() >= 3
-                            && matches!(values.get(succ), Some(Value::Win(wd)) if *wd + 1 <= d)
+                            && matches!(values.get(succ), Some(Value::Win(wd)) if *wd < d)
                     });
                     assert!(all_win, "Loss({d}) at {s:?} not justified: not all successors are opponent wins with matching depth bound");
                 }

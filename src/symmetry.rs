@@ -249,7 +249,7 @@ mod tests {
             let black = black_seed & !white;
             let pos = Position::new(white, black);
             let s = stabilizer_size(pos);
-            prop_assert!(s >= 1 && s <= 16);
+            prop_assert!((1..=16).contains(&s));
             prop_assert_eq!(16 % s, 0, "stabilizer size {} does not divide 16", s);
         }
 

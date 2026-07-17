@@ -162,12 +162,20 @@ impl Side {
     }
 }
 
-fn push_bucket(buckets: &mut Vec<Vec<u64>>, depth: u16, idx: u64) {
+/// A bucket entry. `committed` distinguishes the two ways an entry can
+/// arrive (see `should_process`'s docs for why this matters):
+/// `true` — a propagation-discovered decision, already committed to
+/// `val[idx]` via CAS at push time (in `apply_to_predecessor`); process
+/// its predecessors unconditionally, no further check needed, since that
+/// CAS already proved uniqueness. `false` — a tentative capture-based
+/// win candidate from `init_side`, not yet committed; must go through
+/// `should_process`'s strict CAS at pop time, and may lose that race.
+fn push_bucket(buckets: &mut Vec<Vec<(u64, bool)>>, depth: u16, idx: u64, committed: bool) {
     let d = depth as usize;
     if buckets.len() <= d {
         buckets.resize_with(d + 1, Vec::new);
     }
-    buckets[d].push(idx);
+    buckets[d].push((idx, committed));
 }
 
 /// Initialize one ordered subspace: mark terminal losses (no moves),
@@ -399,26 +407,28 @@ fn apply_to_predecessor(pred_side: &Side, pidx: u64, depth: u16, loss: bool) -> 
     }
 }
 
-/// Try to commit a bucket entry at depth `d` to `val[idx]`, and report
-/// whether its predecessors should be processed.
+/// Try to commit a *tentative* (not-yet-committed) bucket entry at depth
+/// `d` to `val[idx]`, and report whether its predecessors should be
+/// processed.
 ///
-/// Two kinds of bucket entries reach this function: genuine
-/// propagation-discovered decisions (already committed to exactly `d` at
-/// push time, by `apply_to_predecessor`) and deferred capture-based win
-/// candidates from `init_side` (not committed yet, since they might be
-/// beaten by a smaller-depth quiet win processed in an earlier bucket).
-/// Both are handled uniformly here: if the slot is still undecided, this
-/// is the earliest bucket that reached it, so it wins — commit and
-/// process. If it already holds exactly `d`, it's the push-time commit of
-/// a genuine decision — process (no-op re-commit). Otherwise it was
-/// already decided at a smaller depth by something processed earlier;
-/// this entry is stale and must be skipped, including skipping
-/// predecessor processing (already done when the real decision landed).
+/// Only `init_side`'s deferred capture-based win candidates are tentative
+/// — see the module docs on the two kinds of bucket entries. This is a
+/// strict CAS: succeed only if the slot is still undecided. It must NOT
+/// also accept "already holds exactly `d`" as success. That looks
+/// harmless (as if re-confirming the same decision) but isn't: a
+/// tentative entry and a genuine propagation-committed entry for the same
+/// slot can coexist in the same bucket when they happen to land on the
+/// same depth (the committed one's CAS already ran, at push time, during
+/// the *previous* bucket's processing — strictly before this bucket
+/// starts). If a tentative entry that lost that race were still allowed
+/// to "process" just because the value matches, its predecessors would
+/// be visited a second time, double-decrementing their `count` — this
+/// was a real bug (see git history) caught by the forward-consistency
+/// verifier on a pair large enough for a capture-based tentative win and
+/// a same-depth quiet win to coincide, something the small pairs used
+/// for oracle cross-checks never happened to exercise.
 fn should_process(slot: &AtomicU16, d: u16) -> bool {
-    match slot.compare_exchange(DRAW, d, SeqCst, SeqCst) {
-        Ok(_) => true,
-        Err(cur) => cur == d,
-    }
+    slot.compare_exchange(DRAW, d, SeqCst, SeqCst).is_ok()
 }
 
 /// Solve the unordered pair `{a, b}`. All strictly-smaller pairs (by
@@ -437,20 +447,22 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
     let side_a = Side::new(a, b); // subspace (a,b)
     let side_b = Side::new(b, a); // subspace (b,a)
 
-    let mut buckets: Vec<Vec<(bool, u64)>> = Vec::new(); // (is_side_b, idx)
-    let push2 = |buckets: &mut Vec<Vec<(bool, u64)>>, depth: u16, is_b: bool, idx: u64| {
+    // (is_side_b, idx, committed) — see `push_bucket`'s docs for what
+    // `committed` means.
+    let mut buckets: Vec<Vec<(bool, u64, bool)>> = Vec::new();
+    let push2 = |buckets: &mut Vec<Vec<(bool, u64, bool)>>, depth: u16, is_b: bool, idx: u64, committed: bool| {
         let d = depth as usize;
         if buckets.len() <= d {
             buckets.resize_with(d + 1, Vec::new);
         }
-        buckets[d].push((is_b, idx));
+        buckets[d].push((is_b, idx, committed));
     };
 
     for (d, idx) in init_side(&side_a, db) {
-        push2(&mut buckets, d, false, idx);
+        push2(&mut buckets, d, false, idx, false);
     }
     for (d, idx) in init_side(&side_b, db) {
-        push2(&mut buckets, d, true, idx);
+        push2(&mut buckets, d, true, idx, false);
     }
 
     // Buckets are processed strictly in increasing depth order (a hard
@@ -466,10 +478,10 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
         let items = std::mem::take(&mut buckets[d]);
         let new_items: Vec<(bool, u64, u16)> = items
             .into_par_iter()
-            .flat_map_iter(|(is_b, idx)| {
+            .flat_map_iter(|(is_b, idx, committed)| {
                 let side = if !is_b { &side_a } else { &side_b };
                 let mut out = Vec::new();
-                if !should_process(&side.val[idx as usize], d as u16) {
+                if !committed && !should_process(&side.val[idx as usize], d as u16) {
                     return out.into_iter();
                 }
                 let sub = SubspaceId::new(side.w, side.b);
@@ -491,7 +503,7 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
             })
             .collect();
         for (is_b, idx, nd) in new_items {
-            push2(&mut buckets, nd, is_b, idx);
+            push2(&mut buckets, nd, is_b, idx, true);
         }
         d += 1;
     }
@@ -509,10 +521,10 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
 /// into it.
 fn solve_self_paired(a: usize, db: &Database) -> Vec<u16> {
     let side = Side::new(a, a);
-    let mut buckets: Vec<Vec<u64>> = Vec::new();
+    let mut buckets: Vec<Vec<(u64, bool)>> = Vec::new();
 
     for (d, idx) in init_side(&side, db) {
-        push_bucket(&mut buckets, d, idx);
+        push_bucket(&mut buckets, d, idx, false);
     }
 
     let mut d = 0usize;
@@ -520,9 +532,9 @@ fn solve_self_paired(a: usize, db: &Database) -> Vec<u16> {
         let items = std::mem::take(&mut buckets[d]);
         let new_items: Vec<(u64, u16)> = items
             .into_par_iter()
-            .flat_map_iter(|idx| {
+            .flat_map_iter(|(idx, committed)| {
                 let mut out = Vec::new();
-                if !should_process(&side.val[idx as usize], d as u16) {
+                if !committed && !should_process(&side.val[idx as usize], d as u16) {
                     return out.into_iter();
                 }
                 let sub = SubspaceId::new(side.w, side.b);
@@ -538,7 +550,7 @@ fn solve_self_paired(a: usize, db: &Database) -> Vec<u16> {
             })
             .collect();
         for (idx, nd) in new_items {
-            push_bucket(&mut buckets, nd, idx);
+            push_bucket(&mut buckets, nd, idx, true);
         }
         d += 1;
     }
@@ -554,7 +566,7 @@ mod tests {
     fn to_oracle_value(code: u16) -> oracle::Value {
         if code == DRAW {
             oracle::Value::Draw
-        } else if code % 2 == 0 {
+        } else if code.is_multiple_of(2) {
             oracle::Value::Loss(code as u32)
         } else {
             oracle::Value::Win(code as u32)
