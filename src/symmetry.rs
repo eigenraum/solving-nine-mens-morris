@@ -81,21 +81,40 @@ pub fn apply_pos(sym: usize, pos: Position) -> Position {
     Position::new(apply(sym, pos.white()), apply(sym, pos.black()))
 }
 
-/// The canonical form of a position: the lexicographically smallest image
-/// (by `(white, black)` as a 48-bit key) over all 16 symmetries, plus the
-/// symmetry index that produced it (the first one found, if the stabilizer
-/// is nontrivial).
+/// The canonical form of a position: over all 16 symmetries, the image
+/// that minimizes `white` first, breaking ties by minimizing `black`
+/// (i.e. lexicographic on `(white, black)` with white primary — matching
+/// the indexing scheme, which ranks the canonical white set first). Also
+/// returns the symmetry index that produced it (the first one found, if
+/// the stabilizer is nontrivial).
+///
+/// Note this is *not* the same as comparing `pos.0` as a raw `u64`: that
+/// packs black into the high bits, which would make black the primary
+/// sort key instead.
 pub fn canonicalize(pos: Position) -> (Position, usize) {
     let mut best = apply_pos(0, pos);
+    let mut best_key = (best.white(), best.black());
     let mut best_sym = 0;
     for s in 1..N_SYMS {
         let cand = apply_pos(s, pos);
-        if cand.0 < best.0 {
+        let key = (cand.white(), cand.black());
+        if key < best_key {
             best = cand;
+            best_key = key;
             best_sym = s;
         }
     }
     (best, best_sym)
+}
+
+/// True iff `pos` is already its own canonical form — i.e. no symmetry
+/// produces a lexicographically smaller `(white, black)` image. Positions
+/// whose canonical white set has a nontrivial stabilizer have several raw
+/// `(white, black)` encodings in the same orbit; exactly one is canonical.
+/// This is used to skip non-canonical index slots during retrograde
+/// analysis, so that every game-graph edge is counted exactly once.
+pub fn is_canonical(pos: Position) -> bool {
+    canonicalize(pos).0 == pos
 }
 
 /// The canonical form of just a point set (used for the white-set tables in
@@ -198,6 +217,19 @@ mod tests {
     }
 
     proptest! {
+        // The whole indexing scheme (index.rs) relies on canonicalize being
+        // idempotent: re-canonicalizing an already-canonical position must
+        // be a no-op. Otherwise "canonical slots" wouldn't be well-defined.
+        #[test]
+        fn canonicalize_is_idempotent(white in random_mask(), black_seed in random_mask()) {
+            let black = black_seed & !white;
+            let pos = Position::new(white, black);
+            let (canon, _) = canonicalize(pos);
+            prop_assert!(is_canonical(canon));
+            let (canon2, _) = canonicalize(canon);
+            prop_assert_eq!(canon2, canon);
+        }
+
         #[test]
         fn canonical_form_invariant_under_symmetry(mask in random_mask(), sym in 0..N_SYMS) {
             let c1 = canonicalize_set(mask);
