@@ -1,2 +1,7 @@
 target/
 db/
+
+
+# Added by cargo
+
+/target
