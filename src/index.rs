@@ -41,7 +41,7 @@ const fn build_binom() -> [[u64; MAX_N]; MAX_N] {
         let mut k = 1;
         while k <= n {
             let a = c[n - 1][k - 1];
-            let b = if k <= n - 1 { c[n - 1][k] } else { 0 };
+            let b = if k < n { c[n - 1][k] } else { 0 };
             c[n][k] = a + b;
             k += 1;
         }

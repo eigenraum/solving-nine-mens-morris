@@ -27,6 +27,20 @@ enum Commands {
         #[arg(long)]
         max_total: Option<usize>,
     },
+    /// Forward-consistency scan (design.md §8.1): for every solved pair,
+    /// recompute each state's value directly from its successors' stored
+    /// values (independent of the retrograde solver's own logic) and
+    /// report any mismatches. Stops at the first pair with an
+    /// inconsistency, since later pairs depend on it.
+    Verify {
+        #[arg(long, default_value = "db")]
+        dir: PathBuf,
+    },
+    /// Win/loss/draw tallies and deepest win/loss per solved subspace.
+    DbStats {
+        #[arg(long, default_value = "db")]
+        dir: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -62,6 +76,44 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Solve { dir, max_total } => {
             ninemm::orchestrate::solve_all(&dir, max_total)?;
+        }
+        Commands::Verify { dir } => {
+            let reports = ninemm::verify::verify_all(&dir)?;
+            let mut all_ok = true;
+            for r in &reports {
+                if r.ok() {
+                    println!("[{}-{}] OK ({} states checked)", r.a, r.b, r.checked);
+                } else {
+                    all_ok = false;
+                    println!(
+                        "[{}-{}] FAILED: {} mismatches out of {} checked (showing up to 50)",
+                        r.a,
+                        r.b,
+                        r.mismatches.len(),
+                        r.checked
+                    );
+                    for m in &r.mismatches {
+                        println!("    idx={} stored={} expected={}", m.idx, m.stored, m.expected);
+                    }
+                }
+            }
+            if !all_ok {
+                anyhow::bail!("verification found inconsistencies");
+            }
+        }
+        Commands::DbStats { dir } => {
+            use ninemm::index::SubspaceId;
+            use ninemm::persist::{self, Manifest};
+            let manifest = Manifest::load(&dir)?;
+            for entry in &manifest.entries {
+                let sub = SubspaceId::new(entry.w as usize, entry.b as usize);
+                let data = persist::read_subspace_verified(&dir, &manifest, entry.w as usize, entry.b as usize)?;
+                let t = ninemm::verify::tally(sub, &data);
+                println!(
+                    "{}-{}: wins={} losses={} draws={} max_win_depth={} max_loss_depth={}",
+                    entry.w, entry.b, t.wins, t.losses, t.draws, t.max_win_depth, t.max_loss_depth
+                );
+            }
         }
     }
     Ok(())

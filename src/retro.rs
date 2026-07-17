@@ -66,10 +66,10 @@
 //! - `max_seen_depth`: running maximum depth over every successor proven
 //!   to be an opponent win so far (both capturing ones, known instantly
 //!   at init from the smaller pair, and quiet ones, discovered over the
-//!   course of propagation). When `count` reaches 0, `Loss(max_seen_depth
-//!   + 1)` is correct only because bucket-order processing guarantees the
-//!   *last* successor to be accounted for has the maximum depth among all
-//!   of them.
+//!   course of propagation). When `count` reaches 0, the resulting loss
+//!   depth (`max_seen_depth + 1`) is correct only because bucket-order
+//!   processing guarantees the last successor accounted for has the
+//!   maximum depth among all of them.
 
 use crate::index::{self, SubspaceId};
 use crate::movegen::{moves_movement, quiet_predecessors};
@@ -82,7 +82,7 @@ pub const DRAW: u16 = u16::MAX;
 
 #[inline]
 pub fn is_loss(code: u16) -> bool {
-    code != DRAW && code % 2 == 0
+    code != DRAW && code.is_multiple_of(2)
 }
 
 #[inline]
@@ -474,7 +474,7 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
                 }
                 let sub = SubspaceId::new(side.w, side.b);
                 let pos = index::unindex(sub, idx);
-                let loss = (d % 2) == 0;
+                let loss = d.is_multiple_of(2);
 
                 for pred in quiet_predecessors(pos) {
                     let (psub, pidx) = index::index(pred);
@@ -527,7 +527,7 @@ fn solve_self_paired(a: usize, db: &Database) -> Vec<u16> {
                 }
                 let sub = SubspaceId::new(side.w, side.b);
                 let pos = index::unindex(sub, idx);
-                let loss = (d % 2) == 0;
+                let loss = d.is_multiple_of(2);
                 for pred in quiet_predecessors(pos) {
                     let (_psub, pidx) = index::index(pred);
                     if let Some((nd, nidx)) = apply_to_predecessor(&side, pidx, d as u16, loss) {

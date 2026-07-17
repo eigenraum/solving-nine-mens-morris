@@ -34,7 +34,7 @@ impl Manifest {
             return Ok(Manifest::default());
         }
         let text = std::fs::read_to_string(&path).context("reading manifest.json")?;
-        Ok(serde_json::from_str(&text).context("parsing manifest.json")?)
+        serde_json::from_str(&text).context("parsing manifest.json")
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
@@ -69,7 +69,7 @@ fn as_bytes(data: &[u16]) -> &[u8] {
 }
 
 fn bytes_to_u16_vec(bytes: Vec<u8>) -> Result<Vec<u16>> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         bail!("file length {} is not a multiple of 2", bytes.len());
     }
     let mut out = vec![0u16; bytes.len() / 2];

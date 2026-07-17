@@ -54,11 +54,14 @@ pub fn solve_all(dir: &Path, max_total: Option<usize>) -> Result<()> {
         let result = retro::solve_pair(a, b, &db);
         let solve_dt = t_solve.elapsed();
 
-        let (wins, losses, draws) = tally(&result.val_ab);
+        let t = crate::verify::tally(crate::index::SubspaceId::new(a, b), &result.val_ab);
         eprintln!(
-            "[{a}-{b}] solved {} states in {:?} (wins={wins} losses={losses} draws={draws})",
+            "[{a}-{b}] solved {} states in {:?} (wins={} losses={} draws={})",
             result.val_ab.len(),
-            solve_dt
+            solve_dt,
+            t.wins,
+            t.losses,
+            t.draws
         );
 
         let t_write = Instant::now();
@@ -73,20 +76,6 @@ pub fn solve_all(dir: &Path, max_total: Option<usize>) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn tally(values: &[u16]) -> (u64, u64, u64) {
-    let (mut wins, mut losses, mut draws) = (0u64, 0u64, 0u64);
-    for &v in values {
-        if v == retro::DRAW {
-            draws += 1;
-        } else if v % 2 == 0 {
-            losses += 1;
-        } else {
-            wins += 1;
-        }
-    }
-    (wins, losses, draws)
 }
 
 #[cfg(test)]

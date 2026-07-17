@@ -7,3 +7,4 @@ pub mod persist;
 pub mod pos;
 pub mod retro;
 pub mod symmetry;
+pub mod verify;
