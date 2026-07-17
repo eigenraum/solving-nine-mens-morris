@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "ninemm", about = "Solve Nine Men's Morris")]
@@ -13,6 +14,19 @@ enum Commands {
     Board,
     /// Print subspace sizes and canonical white-set table sizes.
     Stats,
+    /// Solve the mid/endgame database, pair by pair, bottom-up. Resumable:
+    /// re-running skips pairs already solved on disk with a matching
+    /// checksum.
+    Solve {
+        /// Directory to read/write the database files and manifest.
+        #[arg(long, default_value = "db")]
+        dir: PathBuf,
+        /// Only solve pairs whose combined stone count is at or below this
+        /// (useful for partial runs / benchmarking). Omit to solve
+        /// everything (all 28 pairs, up to {9,9}).
+        #[arg(long)]
+        max_total: Option<usize>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -45,6 +59,9 @@ fn main() -> anyhow::Result<()> {
             }
             println!("total slots across all 49 subspaces: {total}");
             println!("solve order (28 unordered pairs): {:?}", index::solve_order());
+        }
+        Commands::Solve { dir, max_total } => {
+            ninemm::orchestrate::solve_all(&dir, max_total)?;
         }
     }
     Ok(())

@@ -202,7 +202,10 @@ fn init_side(side: &Side, db: &Database) -> Vec<(u16, u64)> {
         let mut best_win_depth: Option<u16> = None;
         let mut draw_capture_count: u32 = 0;
         let mut max_capture_win_depth: u16 = 0;
-        let mut quiet_classes: std::collections::HashSet<(SubspaceId, u64)> = std::collections::HashSet::new();
+        // Distinct canonical quiet-successor classes, each mapped to `f`:
+        // how many of this state's *raw* successors land in that class
+        // (needed by the analytical reciprocal-count formula below).
+        let mut quiet_classes: std::collections::HashMap<(SubspaceId, u64), u32> = std::collections::HashMap::new();
 
         for succ in &successors {
             if succ.white_count() < 3 {
@@ -225,7 +228,7 @@ fn init_side(side: &Side, db: &Database) -> Vec<(u16, u64)> {
                     max_capture_win_depth = max_capture_win_depth.max(code);
                 }
             } else {
-                quiet_classes.insert(index::index(*succ));
+                *quiet_classes.entry(index::index(*succ)).or_insert(0) += 1;
             }
         }
 
@@ -246,6 +249,24 @@ fn init_side(side: &Side, db: &Database) -> Vec<(u16, u64)> {
             // bucket is actually reached — lets a genuinely smaller-depth
             // quiet win (processed in an earlier bucket, by construction)
             // win the race instead.
+            //
+            // `count` is intentionally left unset here rather than
+            // computed exactly (we `break`-out of the successor scan
+            // above as soon as a capture win is found, so `quiet_classes`
+            // may be incomplete, and this state's own eventual value
+            // never actually depends on `count` — it already has a
+            // legitimate win). But this slot can still be *targeted* by
+            // some other, unrelated state's quiet-predecessor scan (if a
+            // sibling quiet successor of this state independently becomes
+            // a win, `apply_to_predecessor` will try to decrement this
+            // slot's count) — so it still needs a value that safely
+            // absorbs that, rather than the default 0, which would
+            // decrement into a wraparound and, in a debug build,
+            // trip the underflow assertion. Sentinel it to a value no
+            // realistic number of decrements can ever bring to exactly 0
+            // (branching factors here never remotely approach `u32::MAX`,
+            // so this can never spuriously flip the slot to a wrong Loss).
+            side.count[idx as usize].store(u32::MAX, SeqCst);
             return Some((d, idx));
         }
 
@@ -254,22 +275,63 @@ fn init_side(side: &Side, db: &Database) -> Vec<(u16, u64)> {
         // count. Those aren't the same when this state's own symmetry
         // stabilizer is nontrivial: several raw successors can collapse
         // into the same canonical class, but that class only ever gets
-        // decided once, triggering exactly one `quiet_predecessors` call
-        // on its canonical representative. The reciprocal multiplicity
-        // back to this exact slot depends on *that* class's own
-        // stabilizer too (an orbit-counting ratio, not simply 1 or the
-        // raw count) — rather than derive the closed form, we compute it
-        // directly per distinct class by actually running
-        // `quiet_predecessors` and counting hits back to this slot. This
-        // is the same computation propagation will perform later, just
-        // done once up front so `count` is exact from the start.
+        // decided once, triggering exactly one predecessor-discovery
+        // event. The reciprocal multiplicity back to this exact slot is
+        // an orbit-counting ratio, computed analytically rather than by
+        // re-simulating `quiet_predecessors` per class (which cost
+        // O(branching factor) per class and dominated init's runtime on
+        // high-branching, jump-heavy pairs):
+        //
+        //   count(a,b pairs with a-->b, a in orbit(P), b in orbit(C))
+        //     = |orbit(P)| * f(P,C) = |orbit(C)| * r(C,P)
+        //   => r(C,P) = f(P,C) * |orbit(P)| / |orbit(C)|
+        //             = f(P,C) * stab(C) / stab(P)
+        //
+        // (|orbit(X)| = 16 / stab(X) since the 16 symmetries form a group
+        // acting transitively on each orbit — Lagrange's theorem, checked
+        // directly by a property test in symmetry.rs). `f` is this
+        // state's own raw successor count into class C, already tallied
+        // above; `stab(P)`/`stab(C)` are cheap (a 16-way loop each),
+        // independent of branching factor. Verified byte-for-byte
+        // identical to the direct-simulation approach it replaced, and
+        // independently re-verified end-to-end against the oracle.
+        let stab_p = crate::symmetry::stabilizer_size(pos);
         let mut quiet_count: u32 = 0;
-        for &(csub, cidx) in &quiet_classes {
+        for (&(csub, cidx), &f) in &quiet_classes {
             let class_repr = index::unindex(csub, cidx);
-            quiet_count += quiet_predecessors(class_repr)
-                .iter()
-                .filter(|p| index::index(**p) == (sub, idx))
-                .count() as u32;
+            let stab_c = crate::symmetry::stabilizer_size(class_repr);
+            let numerator = f as usize * stab_c;
+            debug_assert_eq!(
+                numerator % stab_p,
+                0,
+                "non-integer reciprocal multiplicity: f={f} stab_c={stab_c} stab_p={stab_p}"
+            );
+            quiet_count += (numerator / stab_p) as u32;
+        }
+
+        // Debug-only regression guard: re-derive the same count by direct
+        // simulation (the approach this formula replaced) and compare.
+        // Zero cost in release builds. This exact computation has already
+        // hidden two real bugs once (see git history) — cheap insurance
+        // against a future change silently breaking the orbit-counting
+        // argument above for some case this session's testing didn't hit.
+        #[cfg(debug_assertions)]
+        {
+            let mut sim_count: u32 = 0;
+            for &(csub, cidx) in quiet_classes.keys() {
+                let class_repr = index::unindex(csub, cidx);
+                sim_count += quiet_predecessors(class_repr)
+                    .iter()
+                    .filter(|p| index::index(**p) == (sub, idx))
+                    .count() as u32;
+            }
+            debug_assert_eq!(
+                quiet_count, sim_count,
+                "reciprocal-count formula/simulation mismatch at idx={idx} pos white={:?} black={:?} classes={:?}",
+                pos.white(),
+                pos.black(),
+                quiet_classes
+            );
         }
 
         let count = quiet_count + draw_capture_count;

@@ -2,6 +2,8 @@ pub mod board;
 pub mod index;
 pub mod movegen;
 pub mod oracle;
+pub mod orchestrate;
+pub mod persist;
 pub mod pos;
 pub mod retro;
 pub mod symmetry;

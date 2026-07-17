@@ -117,6 +117,13 @@ pub fn is_canonical(pos: Position) -> bool {
     canonicalize(pos).0 == pos
 }
 
+/// Number of symmetries that fix `pos` exactly (map it to itself). Always
+/// in `1..=16` and, since the 16 symmetries form a group, always divides
+/// 16 (Lagrange's theorem) — `orbit_size(pos) = 16 / stabilizer_size(pos)`.
+pub fn stabilizer_size(pos: Position) -> usize {
+    (0..N_SYMS).filter(|&s| apply_pos(s, pos) == pos).count()
+}
+
 /// The canonical form of just a point set (used for the white-set tables in
 /// the indexing scheme).
 pub fn canonicalize_set(mask: u32) -> u32 {
@@ -228,6 +235,22 @@ mod tests {
             prop_assert!(is_canonical(canon));
             let (canon2, _) = canonicalize(canon);
             prop_assert_eq!(canon2, canon);
+        }
+
+        // retro.rs's fast reciprocal-count path (init_side) computes
+        // predecessor multiplicities via 16/stabilizer_size as an orbit
+        // size, relying on stabilizer_size always dividing 16 exactly
+        // (Lagrange's theorem, since the 16 symmetries form a group and
+        // stabilizers are subgroups). This is the load-bearing invariant
+        // that makes that optimization sound — verify it directly rather
+        // than only indirectly through end-to-end results.
+        #[test]
+        fn stabilizer_size_always_divides_16(white in random_mask(), black_seed in random_mask()) {
+            let black = black_seed & !white;
+            let pos = Position::new(white, black);
+            let s = stabilizer_size(pos);
+            prop_assert!(s >= 1 && s <= 16);
+            prop_assert_eq!(16 % s, 0, "stabilizer size {} does not divide 16", s);
         }
 
         #[test]
