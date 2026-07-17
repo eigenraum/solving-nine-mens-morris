@@ -216,7 +216,7 @@ mod tests {
             }
             let pos = index::unindex(sub, idx);
             let code = db.lookup_pos(pos);
-            if code == retro::DRAW || code % 2 == 0 {
+            if code == retro::DRAW || code.is_multiple_of(2) {
                 continue; // only start from positions that are wins for the mover to move
             }
             tested_a_win = true;
