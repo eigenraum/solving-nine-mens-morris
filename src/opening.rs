@@ -109,7 +109,7 @@ pub fn solve(state: &PlacementState, db: &Database, tt: &mut HashMap<(Position, 
     from_i8(negamax(state, -1, 1, db, tt))
 }
 
-fn negamax(
+pub(crate) fn negamax(
     state: &PlacementState,
     mut alpha: i8,
     beta: i8,
