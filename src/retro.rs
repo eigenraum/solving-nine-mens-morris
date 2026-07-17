@@ -1,4 +1,26 @@
-//! Retrograde analysis engine (single-threaded; M6 parallelizes this).
+//! Retrograde analysis engine, parallelized with rayon.
+//!
+//! ## Concurrency model
+//!
+//! `Side`'s three per-state arrays (`val`, `count`, `max_seen_depth`) use
+//! atomics so `init_side` can process all slots of a subspace in parallel
+//! (each slot is written by exactly one task, so there's no true
+//! contention there) and so a single bucket's items can be processed in
+//! parallel during propagation (where a predecessor slot genuinely *can*
+//! be touched by more than one concurrent task — e.g. two different items
+//! in the same bucket both having it as a quiet predecessor). Every
+//! atomic operation here uses `SeqCst`. That's stronger (and slower) than
+//! strictly necessary, but the alternative is reasoning precisely about
+//! which weaker orderings are safe for a fairly intricate multi-variable
+//! protocol (a `count` fetch_sub reaching zero must be guaranteed to
+//! observe *every* concurrent `max_seen_depth` update that happened
+//! first, or the computed loss depth could be wrong) — over a
+//! computation spanning billions of states, a silent ordering bug would
+//! be far more costly than the fixed per-operation cost of a full fence.
+//! `compare_exchange` is used everywhere a slot transitions from
+//! undecided to decided, so concurrent writers to the same slot always
+//! have exactly one winner and the rest observe the already-decided
+//! value and back off — never two writers racing to completion.
 //!
 //! Solves one unordered material pair `{a, b}` at a time — i.e. both
 //! ordered subspaces `N(a,b)` and `N(b,a)` together, since a quiet move
@@ -52,7 +74,9 @@
 use crate::index::{self, SubspaceId};
 use crate::movegen::{moves_movement, quiet_predecessors};
 use crate::pos::Position;
+use rayon::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU16, AtomicU32, Ordering::SeqCst};
 
 pub const DRAW: u16 = u16::MAX;
 
@@ -107,14 +131,17 @@ pub struct PairResult {
     pub val_ba: Vec<u16>,
 }
 
-/// One ordered subspace's mutable solving state.
+/// One ordered subspace's mutable solving state. Uses interior mutability
+/// (atomics) throughout — see the module-level concurrency notes — so
+/// `&Side` is enough for both parallel init and parallel propagation;
+/// nothing here ever needs `&mut Side`.
 struct Side {
     w: usize,
     b: usize,
     size: usize,
-    val: Vec<u16>,
-    count: Vec<u32>,
-    max_seen_depth: Vec<u16>,
+    val: Vec<AtomicU16>,
+    count: Vec<AtomicU32>,
+    max_seen_depth: Vec<AtomicU16>,
 }
 
 impl Side {
@@ -124,10 +151,14 @@ impl Side {
             w,
             b,
             size,
-            val: vec![DRAW; size],
-            count: vec![0; size],
-            max_seen_depth: vec![0; size],
+            val: (0..size).into_par_iter().map(|_| AtomicU16::new(DRAW)).collect(),
+            count: (0..size).into_par_iter().map(|_| AtomicU32::new(0)).collect(),
+            max_seen_depth: (0..size).into_par_iter().map(|_| AtomicU16::new(0)).collect(),
         }
+    }
+
+    fn snapshot_val(&self) -> Vec<u16> {
+        self.val.par_iter().map(|x| x.load(SeqCst)).collect()
     }
 }
 
@@ -147,21 +178,25 @@ fn push_bucket(buckets: &mut Vec<Vec<u64>>, depth: u16, idx: u64) {
 /// `count`/`max_seen_depth` scratch entry and stays a pending draw
 /// candidate until propagation resolves it (or leaves it a true draw).
 /// Returns the list of (depth, idx) pairs decided during this pass.
-fn init_side(side: &mut Side, db: &Database) -> Vec<(u16, u64)> {
+/// Parallel over slots: each slot is written by exactly one task (either
+/// contributing an entry to the returned list, or storing its own
+/// `count`/`max_seen_depth`), so there is no contention within this
+/// function despite the shared `&Side`.
+fn init_side(side: &Side, db: &Database) -> Vec<(u16, u64)> {
     let sub = SubspaceId::new(side.w, side.b);
     let total = side.w + side.b;
-    let mut decided = Vec::new();
 
-    for idx in 0..side.size as u64 {
+    (0..side.size as u64)
+        .into_par_iter()
+        .filter_map(|idx| {
         if !index::is_canonical_slot(sub, idx) {
-            continue;
+            return None;
         }
         let pos = index::unindex(sub, idx);
         let successors = moves_movement(pos.white(), pos.black());
 
         if successors.is_empty() {
-            decided.push((0, idx)); // Loss(0); committed when its bucket is processed
-            continue;
+            return Some((0, idx)); // Loss(0); committed when its bucket is processed
         }
 
         let mut best_win_depth: Option<u16> = None;
@@ -211,8 +246,7 @@ fn init_side(side: &mut Side, db: &Database) -> Vec<(u16, u64)> {
             // bucket is actually reached — lets a genuinely smaller-depth
             // quiet win (processed in an earlier bucket, by construction)
             // win the race instead.
-            decided.push((d, idx));
-            continue;
+            return Some((d, idx));
         }
 
         // `count` must equal the number of decrement *events* this state
@@ -253,37 +287,50 @@ fn init_side(side: &mut Side, db: &Database) -> Vec<(u16, u64)> {
         // competing path that could ever produce a different value.
         if count == 0 && quiet_classes.is_empty() {
             let d = max_capture_win_depth + 1;
-            decided.push((d, idx)); // race-free, but deferred uniformly with everything else
-            continue;
+            return Some((d, idx)); // race-free, but deferred uniformly with everything else
         }
 
-        side.count[idx as usize] = count;
-        side.max_seen_depth[idx as usize] = max_capture_win_depth;
-    }
-
-    decided
+        side.count[idx as usize].store(count, SeqCst);
+        side.max_seen_depth[idx as usize].store(max_capture_win_depth, SeqCst);
+        None
+        })
+        .collect()
 }
 
 /// Apply a just-decided state's consequences to one predecessor side.
 /// `loss` is whether the decided state (at `depth`) is a loss for its
 /// mover. Returns `Some((new_depth, idx))` if this predecessor became
-/// decided as a result.
-fn apply_to_predecessor(pred_side: &mut Side, pidx: u64, depth: u16, loss: bool) -> Option<(u16, u64)> {
+/// decided as a result. Safe under concurrent calls targeting the same
+/// `pidx` (from other items in the same bucket): the final `val` write
+/// (whether the immediate win-commit or the count-reaches-zero
+/// loss-commit) is a `compare_exchange` from `DRAW`, so only one
+/// concurrent caller ever wins the transition; the rest observe the
+/// already-decided value and return `None`. `count`/`max_seen_depth`
+/// updates are lock-free RMWs, safe under any number of concurrent
+/// decrementers.
+fn apply_to_predecessor(pred_side: &Side, pidx: u64, depth: u16, loss: bool) -> Option<(u16, u64)> {
     let pi = pidx as usize;
-    if pred_side.val[pi] != DRAW {
-        return None; // already decided
-    }
     if loss {
-        pred_side.val[pi] = depth + 1;
-        Some((depth + 1, pidx))
+        match pred_side.val[pi].compare_exchange(DRAW, depth + 1, SeqCst, SeqCst) {
+            Ok(_) => Some((depth + 1, pidx)),
+            Err(_) => None, // already decided (necessarily at <= this depth)
+        }
     } else {
-        pred_side.max_seen_depth[pi] = pred_side.max_seen_depth[pi].max(depth);
-        debug_assert!(pred_side.count[pi] > 0, "count underflow");
-        pred_side.count[pi] -= 1;
-        if pred_side.count[pi] == 0 {
-            let d = pred_side.max_seen_depth[pi] + 1;
-            pred_side.val[pi] = d;
-            Some((d, pidx))
+        pred_side.max_seen_depth[pi].fetch_max(depth, SeqCst);
+        let prev = pred_side.count[pi].fetch_sub(1, SeqCst);
+        debug_assert!(prev > 0, "count underflow");
+        if prev == 1 {
+            // This call brought count to 0. SeqCst on both the
+            // max_seen_depth store above and this fetch_sub (and every
+            // other thread's matching pair of operations) guarantees this
+            // load observes every concurrent max_seen_depth update that
+            // happened before its corresponding count decrement — see the
+            // module-level concurrency notes.
+            let d = pred_side.max_seen_depth[pi].load(SeqCst) + 1;
+            match pred_side.val[pi].compare_exchange(DRAW, d, SeqCst, SeqCst) {
+                Ok(_) => Some((d, pidx)),
+                Err(_) => None,
+            }
         } else {
             None
         }
@@ -305,13 +352,10 @@ fn apply_to_predecessor(pred_side: &mut Side, pidx: u64, depth: u16, loss: bool)
 /// already decided at a smaller depth by something processed earlier;
 /// this entry is stale and must be skipped, including skipping
 /// predecessor processing (already done when the real decision landed).
-fn should_process(val: &mut [u16], idx: u64, d: u16) -> bool {
-    let pi = idx as usize;
-    if val[pi] == DRAW {
-        val[pi] = d;
-        true
-    } else {
-        val[pi] == d
+fn should_process(slot: &AtomicU16, d: u16) -> bool {
+    match slot.compare_exchange(DRAW, d, SeqCst, SeqCst) {
+        Ok(_) => true,
+        Err(cur) => cur == d,
     }
 }
 
@@ -328,8 +372,8 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
         };
     }
 
-    let mut side_a = Side::new(a, b); // subspace (a,b)
-    let mut side_b = Side::new(b, a); // subspace (b,a)
+    let side_a = Side::new(a, b); // subspace (a,b)
+    let side_b = Side::new(b, a); // subspace (b,a)
 
     let mut buckets: Vec<Vec<(bool, u64)>> = Vec::new(); // (is_side_b, idx)
     let push2 = |buckets: &mut Vec<Vec<(bool, u64)>>, depth: u16, is_b: bool, idx: u64| {
@@ -340,40 +384,52 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
         buckets[d].push((is_b, idx));
     };
 
-    for (d, idx) in init_side(&mut side_a, db) {
+    for (d, idx) in init_side(&side_a, db) {
         push2(&mut buckets, d, false, idx);
     }
-    for (d, idx) in init_side(&mut side_b, db) {
+    for (d, idx) in init_side(&side_b, db) {
         push2(&mut buckets, d, true, idx);
     }
 
+    // Buckets are processed strictly in increasing depth order (a hard
+    // sequential dependency: bucket d+1 can only be correctly populated
+    // once bucket d is fully resolved). Within one bucket, all items are
+    // independent of each other except for possibly sharing a predecessor
+    // slot, which `apply_to_predecessor`/`should_process` handle safely
+    // under concurrent access — so each bucket's items are processed in
+    // parallel via rayon, and the resulting newly-decided predecessors
+    // are collected and pushed into later buckets sequentially afterward.
     let mut d = 0usize;
     while d < buckets.len() {
         let items = std::mem::take(&mut buckets[d]);
-        for (is_b, idx) in items {
-            let side_val = if !is_b { &mut side_a.val } else { &mut side_b.val };
-            if !should_process(side_val, idx, d as u16) {
-                continue;
-            }
-            let sub = if !is_b {
-                SubspaceId::new(side_a.w, side_a.b)
-            } else {
-                SubspaceId::new(side_b.w, side_b.b)
-            };
-            let pos = index::unindex(sub, idx);
-            let loss = (d % 2) == 0;
-
-            for pred in quiet_predecessors(pos) {
-                let (psub, pidx) = index::index(pred);
-                let pred_on_a = psub.w as usize == side_a.w && psub.b as usize == side_a.b;
-                let pred_on_b = psub.w as usize == side_b.w && psub.b as usize == side_b.b;
-                debug_assert!(pred_on_a ^ pred_on_b, "predecessor must land in exactly one side");
-
-                let target = if pred_on_a { &mut side_a } else { &mut side_b };
-                if let Some((nd, nidx)) = apply_to_predecessor(target, pidx, d as u16, loss) {
-                    push2(&mut buckets, nd, pred_on_b, nidx);
+        let new_items: Vec<(bool, u64, u16)> = items
+            .into_par_iter()
+            .flat_map_iter(|(is_b, idx)| {
+                let side = if !is_b { &side_a } else { &side_b };
+                let mut out = Vec::new();
+                if !should_process(&side.val[idx as usize], d as u16) {
+                    return out.into_iter();
                 }
-            }
+                let sub = SubspaceId::new(side.w, side.b);
+                let pos = index::unindex(sub, idx);
+                let loss = (d % 2) == 0;
+
+                for pred in quiet_predecessors(pos) {
+                    let (psub, pidx) = index::index(pred);
+                    let pred_on_a = psub.w as usize == side_a.w && psub.b as usize == side_a.b;
+                    let pred_on_b = psub.w as usize == side_b.w && psub.b as usize == side_b.b;
+                    debug_assert!(pred_on_a ^ pred_on_b, "predecessor must land in exactly one side");
+
+                    let target = if pred_on_a { &side_a } else { &side_b };
+                    if let Some((nd, nidx)) = apply_to_predecessor(target, pidx, d as u16, loss) {
+                        out.push((pred_on_b, nidx, nd));
+                    }
+                }
+                out.into_iter()
+            })
+            .collect();
+        for (is_b, idx, nd) in new_items {
+            push2(&mut buckets, nd, is_b, idx);
         }
         d += 1;
     }
@@ -381,8 +437,8 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
     PairResult {
         a,
         b,
-        val_ab: side_a.val,
-        val_ba: side_b.val,
+        val_ab: side_a.snapshot_val(),
+        val_ba: side_b.snapshot_val(),
     }
 }
 
@@ -390,34 +446,42 @@ pub fn solve_pair(a: usize, b: usize, db: &Database) -> PairResult {
 /// so there is exactly one array and every quiet predecessor routes back
 /// into it.
 fn solve_self_paired(a: usize, db: &Database) -> Vec<u16> {
-    let mut side = Side::new(a, a);
+    let side = Side::new(a, a);
     let mut buckets: Vec<Vec<u64>> = Vec::new();
 
-    for (d, idx) in init_side(&mut side, db) {
+    for (d, idx) in init_side(&side, db) {
         push_bucket(&mut buckets, d, idx);
     }
 
     let mut d = 0usize;
     while d < buckets.len() {
         let items = std::mem::take(&mut buckets[d]);
-        for idx in items {
-            if !should_process(&mut side.val, idx, d as u16) {
-                continue;
-            }
-            let sub = SubspaceId::new(side.w, side.b);
-            let pos = index::unindex(sub, idx);
-            let loss = (d % 2) == 0;
-            for pred in quiet_predecessors(pos) {
-                let (_psub, pidx) = index::index(pred);
-                if let Some((nd, nidx)) = apply_to_predecessor(&mut side, pidx, d as u16, loss) {
-                    push_bucket(&mut buckets, nd, nidx);
+        let new_items: Vec<(u64, u16)> = items
+            .into_par_iter()
+            .flat_map_iter(|idx| {
+                let mut out = Vec::new();
+                if !should_process(&side.val[idx as usize], d as u16) {
+                    return out.into_iter();
                 }
-            }
+                let sub = SubspaceId::new(side.w, side.b);
+                let pos = index::unindex(sub, idx);
+                let loss = (d % 2) == 0;
+                for pred in quiet_predecessors(pos) {
+                    let (_psub, pidx) = index::index(pred);
+                    if let Some((nd, nidx)) = apply_to_predecessor(&side, pidx, d as u16, loss) {
+                        out.push((nidx, nd));
+                    }
+                }
+                out.into_iter()
+            })
+            .collect();
+        for (idx, nd) in new_items {
+            push_bucket(&mut buckets, nd, idx);
         }
         d += 1;
     }
 
-    side.val
+    side.snapshot_val()
 }
 
 #[cfg(test)]
@@ -514,5 +578,23 @@ mod tests {
         let r1 = solve_pair(3, 3, &db);
         let r2 = solve_pair(3, 3, &db);
         assert_eq!(r1.val_ab, r2.val_ab);
+    }
+
+    /// Same check on the {4,3} pair specifically: it exercises the a != b
+    /// path (two distinct concurrently-solved sides, cross-referencing
+    /// each other's predecessors within a bucket) and has enough states
+    /// per bucket to make race conditions in the parallel commit protocol
+    /// far more likely to surface as run-to-run nondeterminism than the
+    /// much smaller {3,3} pair would.
+    #[test]
+    fn deterministic_rerun_4_3_is_byte_identical() {
+        let mut db = Database::new();
+        let r33 = solve_pair(3, 3, &db);
+        db.insert(3, 3, r33.val_ab);
+
+        let r1 = solve_pair(4, 3, &db);
+        let r2 = solve_pair(4, 3, &db);
+        assert_eq!(r1.val_ab, r2.val_ab);
+        assert_eq!(r1.val_ba, r2.val_ba);
     }
 }
