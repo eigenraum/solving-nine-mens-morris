@@ -76,55 +76,105 @@ fn combinations(universe: &[usize], k: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// Solve subspace `(w, b)` (movement phase only) to a fixpoint by plain
-/// forward value iteration. Successors that leave the subspace because a
-/// capture reduced the opponent below 3 stones are treated as immediate
-/// `Loss(0)` for whoever would be to move there — exactly the terminal
-/// rule (fewer than three stones is a loss), applied directly rather than
-/// via any shared initialization code.
-pub fn solve_pair(w: usize, b: usize) -> HashMap<Position, Value> {
-    let states = all_states(w, b);
+/// Solve the unordered pair `{a, b}` — i.e. *both* ordered subspaces
+/// `(a, b)` and `(b, a)` together — to a fixpoint by plain forward value
+/// iteration (Bellman-Ford-style relaxation). This is required, not
+/// optional, whenever `a != b`: a quiet move flips perspective, so a
+/// state with `(a, b)` stones has successors with `(b, a)` stones. Solving
+/// just one ordered subspace in isolation leaves every quiet successor
+/// permanently "unknown" (looked up in a state universe that was never
+/// populated), so only immediate-capture wins would ever be decided.
+///
+/// `smaller` must contain the fully-solved values of every strictly
+/// smaller pair (lower total stone count) reachable by a single capture
+/// from `{a, b}` — mirroring `retro::Database`'s bottom-up dependency
+/// structure, just as a plain combined map instead of a purpose-built
+/// registry. A capture only terminates locally (immediate `Loss(0)`) when
+/// it drops the opponent below 3 stones; otherwise it lands in a smaller
+/// pair (still >= 3 stones per side) that must be looked up here, or every
+/// state depending on that capture's outcome is permanently stuck
+/// "unknown" instead of resolving to the correct value. For the base case
+/// `{3,3}`, every capture drops the opponent below 3, so `smaller` may be
+/// empty.
+///
+/// Critically, this *keeps recomputing every state every pass* rather than
+/// locking in a value the first time one is found. A naive "decide once"
+/// approach is a classic trap here: whether a state's first-discovered
+/// winning reply happens to be its *fastest* one depends on the arbitrary
+/// iteration order of `states`, since a longer dependency chain can
+/// occasionally resolve within a single pass (favorable ordering lets
+/// several hops cascade together) while a shorter chain does not. Locking
+/// in early can therefore permanently fix a state at a *correct but
+/// non-minimal* win/loss depth. Relaxation avoids this: a value is only
+/// ever replaced by a strictly smaller depth of the same kind, so the
+/// process is monotonically improving and bounded, and it only terminates
+/// once a full pass finds no further improvement anywhere — at which
+/// point every value must already equal the true recursive minimum.
+pub fn solve_pair(a: usize, b: usize, smaller: &HashMap<Position, Value>) -> HashMap<Position, Value> {
+    let mut states = all_states(a, b);
+    if a != b {
+        states.extend(all_states(b, a));
+    }
+    let total = a + b;
     let mut values: HashMap<Position, Value> = HashMap::with_capacity(states.len());
 
     loop {
         let mut changed = false;
         for &s in &states {
-            if values.contains_key(&s) {
-                continue;
-            }
             let succs = moves_movement(s.white(), s.black());
-            if succs.is_empty() {
-                values.insert(s, Value::Loss(0));
-                changed = true;
-                continue;
-            }
-            let mut best_win_depth: Option<u32> = None;
-            let mut max_loss_depth = 0u32;
-            let mut all_decided_as_win_for_opponent = true;
-            for succ in &succs {
-                let succ_val = if succ.white_count() < 3 {
-                    Some(Value::Loss(0))
-                } else {
-                    values.get(succ).copied()
-                };
-                match succ_val {
-                    Some(Value::Loss(d)) => {
-                        best_win_depth = Some(best_win_depth.map_or(d + 1, |bd: u32| bd.min(d + 1)));
-                    }
-                    Some(Value::Win(d)) => {
-                        max_loss_depth = max_loss_depth.max(d);
-                    }
-                    _ => {
-                        all_decided_as_win_for_opponent = false;
+            let new_val = if succs.is_empty() {
+                Some(Value::Loss(0))
+            } else {
+                let mut best_win_depth: Option<u32> = None;
+                let mut max_loss_depth = 0u32;
+                let mut all_win = true;
+                for succ in &succs {
+                    let succ_val = if succ.white_count() < 3 {
+                        Some(Value::Loss(0))
+                    } else if (succ.white_count() + succ.black_count()) < total as u32 {
+                        Some(
+                            *smaller.get(succ).unwrap_or_else(|| {
+                                panic!("capture landed in an unsolved smaller pair: {succ:?}")
+                            }),
+                        )
+                    } else {
+                        values.get(succ).copied()
+                    };
+                    match succ_val {
+                        Some(Value::Loss(d)) => {
+                            best_win_depth = Some(best_win_depth.map_or(d + 1, |bd: u32| bd.min(d + 1)));
+                        }
+                        Some(Value::Win(d)) => {
+                            max_loss_depth = max_loss_depth.max(d);
+                        }
+                        Some(Value::Draw) => {
+                            // A permanently-drawn option blocks this state
+                            // from ever being forced into a loss, but
+                            // doesn't decide it either.
+                            all_win = false;
+                        }
+                        None => all_win = false,
                     }
                 }
-            }
-            if let Some(bd) = best_win_depth {
-                values.insert(s, Value::Win(bd));
-                changed = true;
-            } else if all_decided_as_win_for_opponent {
-                values.insert(s, Value::Loss(max_loss_depth + 1));
-                changed = true;
+                if let Some(bd) = best_win_depth {
+                    Some(Value::Win(bd))
+                } else if all_win {
+                    Some(Value::Loss(max_loss_depth + 1))
+                } else {
+                    None
+                }
+            };
+            if let Some(nv) = new_val {
+                let improved = match values.get(&s) {
+                    None => true,
+                    Some(Value::Win(od)) => matches!(nv, Value::Win(nd) if nd < *od),
+                    Some(Value::Loss(od)) => matches!(nv, Value::Loss(nd) if nd < *od),
+                    Some(Value::Draw) => false, // Draw is never assigned mid-loop
+                };
+                if improved {
+                    values.insert(s, nv);
+                    changed = true;
+                }
             }
         }
         if !changed {
@@ -165,7 +215,7 @@ mod tests {
     #[test]
     #[ignore]
     fn solve_3_3_matches_gasser_paper() {
-        let values = solve_pair(3, 3);
+        let values = solve_pair(3, 3, &HashMap::new());
         assert_eq!(values.len(), 2_691_920);
 
         let mut wins = 0usize;
@@ -191,7 +241,7 @@ mod tests {
         // possible (rules are fixed), so we check internal consistency on
         // the full 3-3 solve — every stored value must be justified by its
         // own successors under minimax, using only the oracle's own map.
-        let values = solve_pair(3, 3);
+        let values = solve_pair(3, 3, &HashMap::new());
         let mut checked = 0;
         for (&s, &v) in values.iter() {
             if checked >= 5000 {
