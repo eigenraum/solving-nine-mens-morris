@@ -80,5 +80,7 @@ implementation.md    milestone-by-milestone build plan
 getting-started.md   build, run, reproduce
 readme-database.md   on-disk format spec, for external tools consuming the database
 readme-agent.md      orientation for AI agents working in this repo
+design-nn.md         design: lightweight NN compressing the database for in-browser play
+implementation-nn.md milestone build plan for the NN (data pipeline, training, web export)
 GasserArticle.pdf    the paper this project follows
 ```
