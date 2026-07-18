@@ -166,6 +166,32 @@ pub fn mmap_subspace(dir: &Path, manifest: &Manifest, w: usize, b: usize) -> Res
     Ok(mmap)
 }
 
+/// Memory-map a subspace read-only *and* verify its checksum against the
+/// manifest by hashing once through the mapping (ui-implementation.md M6).
+/// Gives `read_subspace_verified`'s integrity guarantee without its
+/// resident-memory cost: the sequential hashing pass goes through the
+/// evictable page cache instead of allocating an owned copy, so the OS is
+/// free to drop any of it again under memory pressure.
+pub fn mmap_subspace_verified(
+    dir: &Path,
+    manifest: &Manifest,
+    w: usize,
+    b: usize,
+) -> Result<memmap2::Mmap> {
+    let entry = manifest
+        .find(w, b)
+        .with_context(|| format!("no manifest entry for ({w},{b})"))?;
+    let mmap = mmap_subspace(dir, manifest, w, b)?; // also checks the size
+    // The mapped bytes are exactly `as_bytes` of the stored `u16`s
+    // (native-endian, see `write_subspace`), so hashing them directly
+    // matches `xxh3_of` over the decoded slice.
+    let actual = format!("{:016x}", xxhash_rust::xxh3::xxh3_64(&mmap));
+    if actual != entry.xxh3 {
+        bail!("subspace ({w},{b}): checksum mismatch (file {actual}, manifest {})", entry.xxh3);
+    }
+    Ok(mmap)
+}
+
 /// Read a single `u16` out of a mapped subspace file at index `idx`.
 #[inline]
 pub fn mmap_get_u16(mmap: &memmap2::Mmap, idx: u64) -> u16 {
@@ -206,6 +232,10 @@ mod tests {
         let verified = read_subspace_verified(&tmp, &manifest, 4, 3).unwrap();
         assert_eq!(verified, data);
 
+        let mapped = mmap_subspace_verified(&tmp, &manifest, 4, 3).unwrap();
+        let decoded: Vec<u16> = (0..data.len()).map(|i| mmap_get_u16(&mapped, i as u64)).collect();
+        assert_eq!(decoded, data);
+
         assert!(is_solved(&tmp, &manifest, 4, 3));
         assert!(!is_solved(&tmp, &manifest, 5, 3));
 
@@ -222,6 +252,7 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.upsert(entry);
         assert!(read_subspace_verified(&tmp, &manifest, 3, 3).is_err());
+        assert!(mmap_subspace_verified(&tmp, &manifest, 3, 3).is_err());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

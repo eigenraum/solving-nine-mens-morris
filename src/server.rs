@@ -22,13 +22,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 
 /// The opening-search transposition table. Must live for the lifetime of
 /// the server process (see `ui-design.md` §6): every analysis warms every
 /// later one, which is what makes placement-phase analyses fast after the
-/// first probe of any given subtree.
+/// first probe of any given subtree. Shared across the worker threads
+/// behind a `Mutex`, locked once per placement analysis (see [`analyze`]).
 pub type Tt = crate::opening::Tt;
 
 pub struct ServeOptions {
@@ -39,6 +41,9 @@ pub struct ServeOptions {
     pub allow_partial: bool,
     /// Run the empty-board opening solve at startup, into the server's
     /// long-lived `Tt`, so the first placement analysis is instant too.
+    /// Runs *after* the socket is bound: the page and movement-phase
+    /// analyses are served while it runs; placement analyses queue on
+    /// the `Tt` lock until it finishes.
     pub warm: bool,
     /// Serve `index.html` from this directory instead of the copy
     /// embedded at compile time (edit-reload development loop).
@@ -53,8 +58,12 @@ pub struct Loaded {
     pub manifest: Manifest,
 }
 
-/// Load the database exactly as `ninemm play` does: read the manifest,
-/// verify every entry's checksum, insert into a `Database`. Differs from
+/// Load the database by memory-mapping every subspace read-only,
+/// verifying each checksum with one streaming pass through the map
+/// (ui-implementation.md M6). The full database is on the order of a
+/// typical machine's total RAM, so owned `Vec`s here would push the
+/// whole system into swap; mapped, the OS keeps only the touched pages
+/// resident and can drop them again under pressure. Differs from
 /// `play`'s preamble only in what happens when subspaces are missing:
 /// `allow_partial` turns a hard error into `complete: false`.
 pub fn load_db(dir: &Path, allow_partial: bool) -> Result<Loaded> {
@@ -77,9 +86,9 @@ pub fn load_db(dir: &Path, allow_partial: bool) -> Result<Loaded> {
     }
     let mut db = Database::new();
     for e in &manifest.entries {
-        let data = persist::read_subspace_verified(dir, &manifest, e.w as usize, e.b as usize)
-            .with_context(|| format!("loading subspace ({},{})", e.w, e.b))?;
-        db.insert(e.w as usize, e.b as usize, data);
+        let mmap = persist::mmap_subspace_verified(dir, &manifest, e.w as usize, e.b as usize)
+            .with_context(|| format!("mapping subspace ({},{})", e.w, e.b))?;
+        db.insert_mmap(e.w as usize, e.b as usize, mmap);
     }
     let subspaces = manifest.entries.len();
     Ok(Loaded { db, complete, subspaces, manifest })
@@ -88,7 +97,7 @@ pub fn load_db(dir: &Path, allow_partial: bool) -> Result<Loaded> {
 pub fn serve(dir: &Path, opts: &ServeOptions) -> Result<()> {
     let loaded = load_db(dir, opts.allow_partial)?;
     println!(
-        "Loaded {} subspace(s) ({}).",
+        "Mapped {} subspace(s) ({}), checksums verified.",
         loaded.subspaces,
         if loaded.complete {
             "complete"
@@ -97,29 +106,53 @@ pub fn serve(dir: &Path, opts: &ServeOptions) -> Result<()> {
         }
     );
 
-    let mut tt: Tt = opening_cache::load_or_empty(dir, &loaded.manifest);
-    if opts.warm {
-        if loaded.complete {
-            print!("Warming opening transposition table (empty-board solve)... ");
-            std::io::stdout().flush().ok();
-            let start = std::time::Instant::now();
-            let v = opening::solve(&PlacementState::initial(), &loaded.db, &mut tt);
-            println!(
-                "done in {:.1}s: root value = {v:?}",
-                start.elapsed().as_secs_f64()
-            );
-        } else {
-            println!("--warm skipped: database is partial, placement analysis is unavailable.");
-        }
-    }
+    let tt: Mutex<Tt> = Mutex::new(opening_cache::load_or_empty(dir, &loaded.manifest));
 
+    // Bind before the (potentially long) warm solve so the browser sees
+    // a listening server immediately instead of connection-refused.
     let server = tiny_http::Server::http(&opts.bind)
         .map_err(|e| anyhow::anyhow!("failed to bind {}: {e}", opts.bind))?;
     println!("Serving on http://{}", opts.bind);
-    for mut req in server.incoming_requests() {
-        let response = route(&mut req, &loaded, opts, &mut tt);
-        let _ = req.respond(response); // client hung up: ignore, keep serving
-    }
+
+    // A small worker pool (ui-design.md "Threading"): a placement
+    // analysis can run for seconds to minutes, and with a single loop it
+    // would block even `GET /` and `/api/meta`, making the UI look dead.
+    // Placement analyses still serialize on the `Tt` lock; everything
+    // else stays responsive on the other workers.
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                while let Ok(mut req) = server.recv() {
+                    // A panicking analysis must cost one 500 response,
+                    // not silently shrink the worker pool.
+                    let response =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            route(&mut req, &loaded, opts, &tt)
+                        }))
+                        .unwrap_or_else(|_| {
+                            error_response(500, "internal error: analysis panicked (see server log)".to_string())
+                        });
+                    let _ = req.respond(response); // client hung up: ignore, keep serving
+                }
+            });
+        }
+        if opts.warm {
+            if loaded.complete {
+                print!("Warming opening transposition table (empty-board solve)... ");
+                std::io::stdout().flush().ok();
+                let start = std::time::Instant::now();
+                let mut tt = tt.lock().unwrap_or_else(|p| p.into_inner());
+                let v = opening::solve(&PlacementState::initial(), &loaded.db, &mut tt);
+                println!(
+                    "done in {:.1}s: root value = {v:?}",
+                    start.elapsed().as_secs_f64()
+                );
+            } else {
+                println!("--warm skipped: database is partial, placement analysis is unavailable.");
+            }
+        }
+    });
     Ok(())
 }
 
@@ -151,7 +184,7 @@ fn route(
     req: &mut tiny_http::Request,
     loaded: &Loaded,
     opts: &ServeOptions,
-    tt: &mut Tt,
+    tt: &Mutex<Tt>,
 ) -> tiny_http::Response<Cursor<Vec<u8>>> {
     let url = req.url().to_string();
     let is_get = matches!(req.method(), tiny_http::Method::Get);
@@ -170,7 +203,7 @@ fn route(
         let body = serde_json::json!({
             "complete": loaded.complete,
             "subspaces": loaded.subspaces,
-            "mmap": false,
+            "mmap": true,
         })
         .to_string();
         return json_response(200, body);
@@ -400,13 +433,18 @@ pub fn analyze(
     req: &AnalyzeRequest,
     db: &Database,
     complete: bool,
-    tt: &mut Tt,
+    tt: &Mutex<Tt>,
 ) -> Result<AnalyzeResponse, ApiError> {
     let (white_bits, black_bits) = validate(&req.state)?;
     let turn = req.state.turn;
     let is_placement = req.state.white_hand > 0 || req.state.black_hand > 0;
     if is_placement {
-        analyze_placement(req, white_bits, black_bits, turn, db, complete, tt)
+        // One placement analysis at a time: the whole analysis holds the
+        // shared TT so its own successor solves warm each other. Poison
+        // recovery is sound because a panicked search leaves only
+        // complete, individually-valid TT entries behind.
+        let mut tt = tt.lock().unwrap_or_else(|p| p.into_inner());
+        analyze_placement(req, white_bits, black_bits, turn, db, complete, &mut tt)
     } else {
         analyze_movement(req, white_bits, black_bits, turn, db, complete)
     }
@@ -741,7 +779,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_point() {
         let loaded = build_dev_db("dup");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let s = StateJson {
             white: vec![0, 0],
             black: vec![1, 2, 3],
@@ -749,14 +787,14 @@ mod tests {
             white_hand: 0,
             black_hand: 0,
         };
-        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap_err();
+        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap_err();
         assert_eq!(err.status, 400);
     }
 
     #[test]
     fn rejects_overlapping_colors() {
         let loaded = build_dev_db("overlap");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let s = StateJson {
             white: vec![0, 1, 2],
             black: vec![2, 3, 4],
@@ -764,14 +802,14 @@ mod tests {
             white_hand: 0,
             black_hand: 0,
         };
-        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap_err();
+        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap_err();
         assert_eq!(err.status, 400);
     }
 
     #[test]
     fn rejects_too_many_total_stones() {
         let loaded = build_dev_db("toomany");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let s = StateJson {
             white: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
             black: vec![9, 10, 11],
@@ -779,14 +817,14 @@ mod tests {
             white_hand: 1,
             black_hand: 0,
         };
-        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap_err();
+        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap_err();
         assert_eq!(err.status, 400);
     }
 
     #[test]
     fn rejects_bad_hand_alternation() {
         let loaded = build_dev_db("alt");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let s = StateJson {
             white: vec![],
             black: vec![],
@@ -794,14 +832,14 @@ mod tests {
             white_hand: 9,
             black_hand: 8,
         };
-        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap_err();
+        let err = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap_err();
         assert_eq!(err.status, 400);
     }
 
     #[test]
     fn fewer_than_three_is_game_over() {
         let loaded = build_dev_db("fewer");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let s = StateJson {
             white: vec![0, 1],
             black: vec![9, 10, 11],
@@ -809,7 +847,7 @@ mod tests {
             white_hand: 0,
             black_hand: 0,
         };
-        let resp = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap();
+        let resp = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap();
         assert!(resp.moves.is_empty());
         let result = resp.result.unwrap();
         assert_eq!(result.winner, Color::Black);
@@ -819,7 +857,7 @@ mod tests {
     #[test]
     fn blocked_position_is_no_moves_game_over() {
         let loaded = build_dev_db("blocked");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         // Find a blocked position in the {4,3} subspace by scanning canonical slots.
         let sub = SubspaceId::new(4, 3);
         let mut found = None;
@@ -844,7 +882,7 @@ mod tests {
             white_hand: 0,
             black_hand: 0,
         };
-        let resp = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap();
+        let resp = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap();
         assert!(resp.moves.is_empty());
         let result = resp.result.unwrap();
         assert_eq!(result.winner, Color::Black);
@@ -855,7 +893,7 @@ mod tests {
     fn partial_database_rejects_out_of_range_movement_analysis() {
         let loaded = build_dev_db("partial");
         assert!(!loaded.complete);
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         // 5-vs-5 is outside the {3,3}/{4,3} dev database.
         let s = StateJson {
             white: vec![0, 1, 2, 3, 4],
@@ -864,14 +902,14 @@ mod tests {
             white_hand: 0,
             black_hand: 0,
         };
-        let err = analyze(&req(s, true), &loaded.db, loaded.complete, &mut tt).unwrap_err();
+        let err = analyze(&req(s, true), &loaded.db, loaded.complete, &tt).unwrap_err();
         assert_eq!(err.status, 409);
     }
 
     #[test]
     fn partial_database_rejects_placement_analysis() {
         let loaded = build_dev_db("partial_placement");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let s = StateJson {
             white: vec![],
             black: vec![],
@@ -879,7 +917,7 @@ mod tests {
             white_hand: 9,
             black_hand: 9,
         };
-        let err = analyze(&req(s, true), &loaded.db, loaded.complete, &mut tt).unwrap_err();
+        let err = analyze(&req(s, true), &loaded.db, loaded.complete, &tt).unwrap_err();
         assert_eq!(err.status, 409);
     }
 
@@ -904,7 +942,7 @@ mod tests {
             let a = bits(pos.white()).map(|p| p as u8).collect::<Vec<_>>();
             let b = bits(pos.black()).map(|p| p as u8).collect::<Vec<_>>();
 
-            let mut tt1 = Tt::new();
+            let tt1 = Mutex::new(Tt::new());
             let s1 = StateJson {
                 white: a.clone(),
                 black: b.clone(),
@@ -912,9 +950,9 @@ mod tests {
                 white_hand: 0,
                 black_hand: 0,
             };
-            let r1 = analyze(&req(s1, true), &loaded.db, loaded.complete, &mut tt1).unwrap();
+            let r1 = analyze(&req(s1, true), &loaded.db, loaded.complete, &tt1).unwrap();
 
-            let mut tt2 = Tt::new();
+            let tt2 = Mutex::new(Tt::new());
             let s2 = StateJson {
                 white: b.clone(),
                 black: a.clone(),
@@ -922,7 +960,7 @@ mod tests {
                 white_hand: 0,
                 black_hand: 0,
             };
-            let r2 = analyze(&req(s2, true), &loaded.db, loaded.complete, &mut tt2).unwrap();
+            let r2 = analyze(&req(s2, true), &loaded.db, loaded.complete, &tt2).unwrap();
 
             assert_eq!(r1.phase, r2.phase);
             assert_eq!(
@@ -994,19 +1032,19 @@ mod tests {
                 white_hand: 0,
                 black_hand: 0,
             };
-            let mut tt = Tt::new();
-            let resp = analyze(&req(s, true), &loaded.db, loaded.complete, &mut tt).unwrap();
+            let tt = Mutex::new(Tt::new());
+            let resp = analyze(&req(s, true), &loaded.db, loaded.complete, &tt).unwrap();
             if resp.result.is_some() {
                 continue;
             }
             for m in &resp.moves {
                 let Some(v) = m.value else { continue };
-                let mut tt2 = Tt::new();
+                let tt2 = Mutex::new(Tt::new());
                 let succ_resp = analyze(
                     &req(m.result.clone(), true),
                     &loaded.db,
                     loaded.complete,
-                    &mut tt2,
+                    &tt2,
                 )
                 .unwrap();
                 match v.outcome {
@@ -1053,7 +1091,7 @@ mod tests {
     #[test]
     fn engine_move_index_is_valid() {
         let loaded = build_dev_db("engine");
-        let mut tt = Tt::new();
+        let tt = Mutex::new(Tt::new());
         let sub = SubspaceId::new(3, 3);
         let pos = index::unindex(sub, 0);
         let s = StateJson {
@@ -1063,7 +1101,7 @@ mod tests {
             white_hand: 0,
             black_hand: 0,
         };
-        let resp = analyze(&req(s, false), &loaded.db, loaded.complete, &mut tt).unwrap();
+        let resp = analyze(&req(s, false), &loaded.db, loaded.complete, &tt).unwrap();
         if let Some(i) = resp.engine_move {
             assert!(i < resp.moves.len());
         }

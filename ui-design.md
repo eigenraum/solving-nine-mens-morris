@@ -85,26 +85,34 @@ keeps the server a pure function `state → analysis` — easy to test without H
 Identical to the existing `play` command's preamble (reuse that code, factored into a
 helper): load `manifest.json`, require all 49 subspaces present (partial databases
 panic mid-search once the opening search or a capture probe needs a missing pair),
-`read_subspace_verified` each file into a `retro::Database`. Add one development
+`mmap_subspace_verified` each file into a `retro::Database`. Add one development
 escape hatch: `--allow-partial` skips the completeness check and makes the server
 refuse placement-phase analysis (HTTP error) while still analyzing movement-phase
 positions whose material pairs are present — this is what makes the implementation
 testable against a fast `solve --max-total 7` database instead of the full 17 GiB one.
 
-**Memory.** Default mode loads everything into RAM like `play` does (~17.5 GiB —
-needs a ≥24 GiB machine). Because a UI session touches only a handful of values per
-move, an `--mmap` mode maps the files read-only instead (verifying checksums by
-hashing the mapped bytes once); the OS page cache then keeps the touched pages
-resident and the server runs comfortably on an 8 GiB machine. This requires
-`retro::Database` to hold either owned or mapped storage — a small, contained change
-(see implementation guide M6). The mmap mode is an optional milestone; everything
-else works without it.
+**Memory.** The server always memory-maps the subspace files read-only, verifying
+each checksum with one streaming pass through the map (implemented as M6). Because a
+UI session touches only a handful of values per move, the OS keeps just the touched
+pages resident — and can drop them again under pressure — so the server runs
+comfortably even on an 8 GiB machine. The original plan (load owned `Vec`s like
+`play` once did, ~17.5 GiB, with mmap as an opt-in flag) turned out to be a trap:
+on any machine without ~24 GiB free the load pushed the whole system into swap and
+every analysis thrashed, which is exactly the "terribly slow or dead UI" failure
+mode. `retro::Database` holds either owned or mapped storage, so everything
+downstream of loading is unchanged.
 
-**Threading: single-threaded request loop.** One user, one board, tiny request rate.
-A synchronous loop (via the `tiny_http` crate — no async runtime, matching the
-codebase's zero-async style) processes one request at a time, which also means the
-opening-search transposition table can be a plain `HashMap` owned by the loop — no
-locks anywhere.
+**Threading: a small worker pool.** One user, one board, tiny request rate — but a
+cold placement analysis can hold a request for seconds to minutes, and the original
+single-threaded loop then blocked even `GET /` and `/api/meta`: reloading the page
+mid-analysis looked like a dead server. A handful of synchronous worker threads
+(still `tiny_http`, still no async runtime, matching the codebase's zero-async
+style) each `recv()` from the shared server. The opening-search transposition table
+sits behind a `Mutex` locked once per placement analysis, so placement analyses
+still serialize — the TT-warming benefit is unchanged — while the page, `/api/meta`,
+and movement-phase analyses stay responsive on the other workers. `--warm` runs
+after the socket is bound, holding the TT lock, so the UI loads immediately during
+warming and only placement analyses wait for it.
 
 ### 3.2 The one endpoint that matters: `POST /api/analyze`
 
@@ -177,7 +185,7 @@ Semantics, pinned down (this is where every subtle bug lives):
 ### 3.3 Other routes
 
 - `GET /` → the embedded `index.html`.
-- `GET /api/meta` → `{ "complete": true, "subspaces": 49, "mmap": false }` so the UI
+- `GET /api/meta` → `{ "complete": true, "subspaces": 49, "mmap": true }` so the UI
   can display database status and disable placement play against a partial database.
 
 No CORS, no TLS, no auth: the server binds `127.0.0.1` by default (`--bind` to
@@ -282,9 +290,10 @@ class: values shown for the wrong side. Two cheap, strong checks are mandated:
   The UI shows a busy indicator during analysis and disables input. TT growth is
   bounded in practice (entries are 11-byte key/value pairs; a long analysis session
   stays in the hundreds of MB) — acceptable for a workstation tool; not persisted.
-- The engine "thinks" on the server synchronously; with a single-threaded loop a slow
-  placement analysis blocks the (single) user's next request, which is exactly the
-  right behavior.
+- The engine "thinks" on the server synchronously; placement analyses serialize on
+  the transposition-table lock, so a slow analysis delays the user's next *placement
+  analysis* — but never the page itself, `/api/meta`, or movement-phase requests
+  (worker pool, §3.1 Threading).
 
 ## 7. Out of scope (deliberately)
 
@@ -301,5 +310,5 @@ class: values shown for the wrong side. Two cheap, strong checks are mandated:
 | Perspective (mover vs. color) slip in server or UI | single conversion point (§3.2); mandatory tests (§5); wire format is always physical-color |
 | Client and server rules drift | client has no rules — it can only play moves the server enumerated, and applies server-provided successor states |
 | First placement analysis feels hung | process-lifetime TT, `--warm`, busy indicator, `evaluate:false` fast path |
-| 17.5 GiB RAM unavailable | `--mmap` mode (M6); `--allow-partial` + position setup for development |
+| 17.5 GiB RAM unavailable | mmap is the only load path (M6): just the touched pages stay resident; `--allow-partial` + position setup for development |
 | Partial dev database panics mid-search | completeness check at startup identical to `play`; `--allow-partial` restricts to movement-phase pairs that are present and rejects placement analysis |

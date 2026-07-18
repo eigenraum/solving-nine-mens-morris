@@ -1,0 +1,1 @@
+curl -s -m 300 -X POST http://127.0.0.1:8081/api/analyze -d  -o /dev/null  0,00s user 0,00s system 0% cpu 25,252 total
