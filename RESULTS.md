@@ -98,16 +98,30 @@ Reproduce with `./target/release/ninemm db-stats --dir db` after a full solve.
 
 The empty-board game-theoretic value — Nine Men's Morris' headline result, matching
 Gasser's published conclusion that the game is a **draw** with perfect play — is
-computed by an alpha-beta search over the full database (`ninemm::opening`). This
-search is memory-intensive (it can, in principle, reach almost any material split, so
-it needs access to the full ~17 GB database) and was still running at the time this
-file was last updated, constrained by this machine's 18 GB of RAM (the search process
-was observed spending significant time in disk I/O waiting on memory-mapped pages,
-rather than being compute-bound).
+computed by an alpha-beta search over the full database (`ninemm::opening`,
+`ninemm solve-opening`). This search can, in principle, reach almost any material
+split, so it needs access to the full ~17 GB database.
 
-This does not affect the mid/endgame result above, which is independently complete and
-verified. On a machine with more headroom over the database's ~17 GB footprint, the
-opening search should complete comfortably (Gasser's own equivalent search visited only
-a few tens of thousands of nodes at the 8-ply level with move ordering and a
-transposition table). This section will be updated with the confirmed root value once
-available.
+**Known limitation on this development machine.** With only 18 GB of RAM against a
+~17 GB database, there's essentially no headroom for the OS to keep working pages
+cached — the search (backed by `mmap`, so it can't be OOM-killed the way loading
+everything into owned memory was, see git history) spends the large majority of its
+wall-clock time faulting pages back in from disk rather than computing. A run was left
+going for several hours and was still in progress (confirmed alive and still making
+genuine, if very slow, forward progress — CPU time kept climbing, just far slower than
+wall-clock time) when this section was last updated. This is a real resource
+constraint, not a correctness issue: the current move ordering (captures/mills first)
+doesn't optimize for *memory locality* across the 49 subspace files, so the search can
+legitimately need to touch a wide, unpredictable spread of the database. Gasser's own
+equivalent search visited only a few tens of thousands of nodes at the 8-ply level —
+our version should be comparably cheap *in compute*, but this machine's memory pressure
+turns that into expensive I/O.
+
+**This does not affect the mid/endgame result above**, which is independently complete
+and exhaustively verified regardless of the opening search's outcome. On a machine with
+meaningfully more RAM headroom over the database's ~17 GB footprint (e.g. 32 GB+), or
+after adding cache-locality-aware move ordering to `opening.rs`, this search should
+complete quickly. Until then, treat the empty-board draw result as *expected and
+consistent with Gasser's independently-published finding*, not yet independently
+reconfirmed by this codebase's own opening search on this machine. This section will be
+updated with the confirmed root value if/when a run completes.
