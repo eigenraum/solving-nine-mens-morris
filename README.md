@@ -22,13 +22,13 @@ the full statistics (win/loss/draw tallies and maximum depths per subspace).
 
 The headline claim — Nine Men's Morris is a **draw** with perfect play, matching
 Gasser's original result — depends on one more step: an 18-ply alpha-beta search from
-the empty board over that database. That search needs access to the whole ~17 GB
-database, and on the 18 GB development machine there isn't enough RAM headroom to keep
-it cached, so it's been running for hours dominated by disk I/O rather than compute — a
-real resource constraint, not a correctness gap. See [`RESULTS.md`](RESULTS.md) for
-details and the confirmed root value once a run completes (on this machine or one with
-more RAM). This does not affect the mid/endgame result, which stands independently and
-is already complete.
+the empty board over that database. **Independently confirmed**: after fixing a missing
+move-ordering heuristic (`opening::successors` wasn't ordering captures/center-symmetric
+points first at all, despite the design assuming it did), the search finished in under
+a minute against the full ~17 GB database and reported `Draw` — see
+[`RESULTS.md`](RESULTS.md) for the full account, including two earlier multi-hour
+attempts that didn't complete before the fix. The mid/endgame result above stands
+independently and is already complete regardless.
 
 ## How this differs from Gasser's approach
 
