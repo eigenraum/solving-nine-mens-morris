@@ -269,6 +269,17 @@ pub struct AnalyzeRequest {
     pub state: StateJson,
     #[serde(default)]
     pub evaluate: bool,
+    /// Compute `engineMove` in the *placement* phase even when `evaluate`
+    /// is false. Off by default because it costs a full opening search
+    /// (the early-exit-on-first-win never fires from drawn states, e.g.
+    /// the empty board), which a client showing a human-owned turn would
+    /// pay for and then ignore. Movement-phase `engineMove` is always
+    /// computed — it really is cheap there (a handful of probes) — and
+    /// `evaluate: true` placement analyses derive it from the per-move
+    /// values at no extra cost, so this flag only matters for
+    /// `evaluate: false` placement requests where the engine owns the turn.
+    #[serde(default)]
+    pub engine: bool,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -439,12 +450,7 @@ pub fn analyze(
     let turn = req.state.turn;
     let is_placement = req.state.white_hand > 0 || req.state.black_hand > 0;
     if is_placement {
-        // One placement analysis at a time: the whole analysis holds the
-        // shared TT so its own successor solves warm each other. Poison
-        // recovery is sound because a panicked search leaves only
-        // complete, individually-valid TT entries behind.
-        let mut tt = tt.lock().unwrap_or_else(|p| p.into_inner());
-        analyze_placement(req, white_bits, black_bits, turn, db, complete, &mut tt)
+        analyze_placement(req, white_bits, black_bits, turn, db, complete, tt)
     } else {
         analyze_movement(req, white_bits, black_bits, turn, db, complete)
     }
@@ -614,7 +620,7 @@ fn analyze_placement(
     turn: Color,
     db: &Database,
     complete: bool,
-    tt: &mut Tt,
+    tt: &Mutex<Tt>,
 ) -> Result<AnalyzeResponse, ApiError> {
     if !complete {
         return Err(conflict(
@@ -654,6 +660,16 @@ fn analyze_placement(
         return Ok(game_over_response("placement", turn.other(), "noMoves"));
     }
 
+    // One placement *search* at a time: the whole analysis holds the
+    // shared TT so its own successor solves warm each other. Requests
+    // that only enumerate moves (no `evaluate`, no `engine`) never touch
+    // the TT and never wait here — the board stays instant even while
+    // another analysis (or the --warm solve) holds the lock. Poison
+    // recovery is sound because a panicked search leaves only complete,
+    // individually-valid TT entries behind.
+    let mut tt_guard = (req.evaluate || req.engine)
+        .then(|| tt.lock().unwrap_or_else(|p| p.into_inner()));
+
     let next = turn.other();
     let mut moves = Vec::with_capacity(succs.len());
     let mut values: Vec<Option<ValueJson>> = Vec::with_capacity(succs.len());
@@ -671,7 +687,7 @@ fn analyze_placement(
             // opening::solve gives the value for s's mover (the *next*
             // player); negate it to get the value of making this move for
             // the current mover.
-            let v = opening::solve(s, db, tt);
+            let v = opening::solve(s, db, tt_guard.as_mut().expect("evaluate implies the TT lock is held"));
             let outcome = match v {
                 opening::Value::Win => Outcome::Loss,
                 opening::Value::Draw => Outcome::Draw,
@@ -695,7 +711,7 @@ fn analyze_placement(
     }
 
     let value = req.evaluate.then(|| {
-        let v = opening::solve(&ps, db, tt);
+        let v = opening::solve(&ps, db, tt_guard.as_mut().expect("evaluate implies the TT lock is held"));
         let outcome = match v {
             opening::Value::Win => Outcome::Win,
             opening::Value::Draw => Outcome::Draw,
@@ -732,13 +748,18 @@ fn analyze_placement(
                 })
             })
             .or(Some(0))
-    } else {
+    } else if req.engine {
+        let tt = tt_guard.as_mut().expect("engine implies the TT lock is held");
         play::best_placement_move(&ps, db, tt).map(|choice| {
             succs
                 .iter()
                 .position(|s| *s == choice)
                 .expect("choice comes from succs")
         })
+    } else {
+        // Neither requested: don't pay for an opening search the client
+        // will not display (e.g. the initial page load on a human turn).
+        None
     };
 
     Ok(AnalyzeResponse {
@@ -773,7 +794,7 @@ mod tests {
     }
 
     fn req(state: StateJson, evaluate: bool) -> AnalyzeRequest {
-        AnalyzeRequest { state, evaluate }
+        AnalyzeRequest { state, evaluate, engine: false }
     }
 
     #[test]

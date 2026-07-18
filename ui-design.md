@@ -127,7 +127,8 @@ server):
   "turn": "white",
   "whiteHand": 0,               // stones not yet placed
   "blackHand": 0,
-  "evaluate": true              // false ⇒ skip per-move values (perf, see §6)
+  "evaluate": true,             // false ⇒ skip per-move values (perf, see §6)
+  "engine": false               // request engineMove even without evaluate (see below)
 }
 ```
 
@@ -174,9 +175,14 @@ Semantics, pinned down (this is where every subtle bug lives):
   the current state.
 - **`engineMove`**: the index of the move `play::best_movement_move` /
   `play::best_placement_move` would pick (min-depth win ▸ any draw ▸ max-depth loss).
-  Always computed (it's cheap given the above; in the placement phase with
-  `evaluate:false` it early-exits on the first winning move like `play` does). The
-  client uses it when the engine owns the side to move, and ignores it otherwise.
+  In the movement phase it is always computed (a handful of probes). In the
+  placement phase it is computed only when `evaluate` is true (derived from the
+  per-move values at no extra cost) or the request sets `"engine": true` — an
+  `evaluate:false` placement `engineMove` costs a full opening search (the
+  early-exit on a first winning move never fires from drawn states, e.g. the empty
+  board), so the client requests it only when the engine actually owns the side to
+  move. Otherwise `engineMove` is null and the client, which ignores it on human
+  turns anyway, loses nothing — this is what keeps the initial page load instant.
 - **Game over**: movement — a side already below 3 stones, or the mover has no legal
   move; placement — the mover's `total` (board + hand) below 3. `moves` is empty and
   `result` set. (A player with stones in hand can never be blocked: at most 18 of 24
@@ -286,8 +292,11 @@ class: values shown for the wrong side. Two cheap, strong checks are mandated:
   table **lives for the whole server process** (every analysis warms every later
   one; the same table is what makes `play`'s engine fast after its first move);
   `--warm` optionally runs the empty-board solve at startup so even the first ply-1
-  analysis is instant; `evaluate:false` (checkbox off) uses the early-cutoff path.
-  The UI shows a busy indicator during analysis and disables input. TT growth is
+  analysis is instant; `evaluate:false` (checkbox off) uses the early-cutoff path
+  when the engine owns the turn, and runs **no search at all** on human-owned turns
+  (the client omits `"engine": true`, §3.2 — move enumeration is then instant and
+  doesn't even wait on the TT lock). The UI shows a busy indicator during analysis
+  and disables input. TT growth is
   bounded in practice (entries are 11-byte key/value pairs; a long analysis session
   stays in the hundreds of MB) — acceptable for a workstation tool; not persisted.
 - The engine "thinks" on the server synchronously; placement analyses serialize on

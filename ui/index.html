@@ -258,7 +258,16 @@ async function refresh() {
     res = await fetch("/api/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...state, evaluate: showEval }),
+      // `engine` asks the server for engineMove even without evaluation —
+      // a full opening search in the placement phase, so only request it
+      // when the engine actually owns the side to move. Keeps the initial
+      // page load (human turn, evaluation off) instant instead of showing
+      // "thinking…" over a search nobody asked to see.
+      body: JSON.stringify({
+        ...state,
+        evaluate: showEval,
+        engine: mode !== "both" && state.turn !== mode,
+      }),
     });
   } catch (e) {
     busy = false;
