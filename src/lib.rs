@@ -2,6 +2,7 @@ pub mod board;
 pub mod index;
 pub mod movegen;
 pub mod opening;
+pub mod opening_cache;
 pub mod oracle;
 pub mod orchestrate;
 pub mod persist;

@@ -60,6 +60,19 @@ enum Commands {
         #[arg(long, default_value = "db")]
         dir: PathBuf,
     },
+    /// Run the empty-board opening solve and persist its shallow
+    /// transposition-table entries to db/opening_cache.bin, so later
+    /// `play` / `serve` / `solve-opening` runs start warm (see
+    /// design-opening-phase.md). Requires the full 49-subspace database.
+    BuildOpeningCache {
+        #[arg(long, default_value = "db")]
+        dir: PathBuf,
+        /// Keep entries within this many plies of the empty board
+        /// (a ply-p state has mover_hand + opp_hand == 18 - p; the
+        /// default 8 matches Gasser's cutoff).
+        #[arg(long, default_value_t = 8)]
+        max_ply: u8,
+    },
     /// Serve the browser UI and JSON analysis API over the solved
     /// database (see ui-design.md).
     Serve {
@@ -154,7 +167,8 @@ fn main() -> anyhow::Result<()> {
             run_play(&dir, &human)?;
         }
         Commands::SolveOpening { dir } => {
-            use ninemm::opening;
+            use ninemm::opening::{self, PlacementState};
+            use ninemm::opening_cache;
             use ninemm::persist::{self, Manifest};
             use ninemm::retro::Database;
             use std::time::Instant;
@@ -166,10 +180,79 @@ fn main() -> anyhow::Result<()> {
                 let mmap = persist::mmap_subspace(&dir, &manifest, e.w as usize, e.b as usize)?;
                 db.insert_mmap(e.w as usize, e.b as usize, mmap);
             }
+            let mut tt = opening_cache::load_or_empty(&dir, &manifest);
             let t0 = Instant::now();
-            let value = opening::solve_from_empty_board(&db);
+            let value = opening::solve(&PlacementState::initial(), &db, &mut tt);
             eprintln!("opening search finished in {:?}", t0.elapsed());
             println!("Empty board value: {value:?}");
+        }
+        Commands::BuildOpeningCache { dir, max_ply } => {
+            use ninemm::opening::{self, PlacementState};
+            use ninemm::opening_cache;
+            use ninemm::persist::{self, Manifest};
+            use ninemm::retro::Database;
+            use std::time::Instant;
+
+            if max_ply > 18 {
+                anyhow::bail!("--max-ply must be at most 18, got {max_ply}");
+            }
+
+            let manifest = Manifest::load(&dir)?;
+            let expected: Vec<(usize, usize)> =
+                (3..=9).flat_map(|w| (3..=9).map(move |b| (w, b))).collect();
+            let missing: Vec<(usize, usize)> = expected
+                .iter()
+                .copied()
+                .filter(|&(w, b)| manifest.find(w, b).is_none())
+                .collect();
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "database at {} is incomplete ({} of 49 subspaces missing, e.g. {:?}) -- \
+                     building the opening cache needs the full solve (`ninemm solve --dir {}`) \
+                     to finish first",
+                    dir.display(),
+                    missing.len(),
+                    &missing[..missing.len().min(5)],
+                    dir.display()
+                );
+            }
+
+            eprintln!("mapping {} subspaces...", manifest.entries.len());
+            let mut db = Database::new();
+            for e in &manifest.entries {
+                let mmap = persist::mmap_subspace(&dir, &manifest, e.w as usize, e.b as usize)?;
+                db.insert_mmap(e.w as usize, e.b as usize, mmap);
+            }
+
+            // A still-valid existing cache legally warm-starts the
+            // rebuild: entries are exact-or-bounded facts independent of
+            // search order, so reusing them (even under a different
+            // --max-ply than last time) only saves work.
+            let mut tt = opening_cache::load_or_empty(&dir, &manifest);
+            let t0 = Instant::now();
+            let value = opening::solve(&PlacementState::initial(), &db, &mut tt);
+            let solve_elapsed = t0.elapsed();
+            println!("Empty board value: {value:?} (search took {solve_elapsed:?})");
+
+            let min_hand_sum = 18 - max_ply;
+            let fingerprint = opening_cache::db_fingerprint(&manifest);
+            let t1 = Instant::now();
+            let (entries_written, file_bytes) = opening_cache::write_cache(&dir, fingerprint, &tt, min_hand_sum)?;
+            let write_elapsed = t1.elapsed();
+
+            if entries_written > 10_000_000 {
+                eprintln!(
+                    "warning: {entries_written} cache entries is far more than expected \
+                     (low hundreds of thousands for a ply-8 cutoff) -- investigate before \
+                     trusting this cache (possible key-collision or canonicalization bug)"
+                );
+            }
+            println!(
+                "Wrote {entries_written} entries ({file_bytes} bytes) to {} in {write_elapsed:?} \
+                 (max_ply={max_ply}, total wall-clock {:?})",
+                dir.join(ninemm::opening_cache::CACHE_FILENAME).display(),
+                solve_elapsed + write_elapsed
+            );
         }
         Commands::Serve {
             dir,
@@ -217,11 +300,11 @@ fn main() -> anyhow::Result<()> {
 fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
     use ninemm::board;
     use ninemm::opening::{self, PlacementState};
+    use ninemm::opening_cache;
     use ninemm::persist::{self, Manifest};
     use ninemm::play;
     use ninemm::pos::Position;
     use ninemm::retro::Database;
-    use std::collections::HashMap;
     use std::io::{self, BufRead, Write};
 
     let human_is_white = match human.to_lowercase().as_str() {
@@ -278,7 +361,7 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
-    let mut tt: HashMap<(Position, u8, u8), i8> = HashMap::new();
+    let mut tt = opening_cache::load_or_empty(dir, &manifest);
 
     let mut placement: Option<PlacementState> = Some(PlacementState::initial());
     let mut movement: Option<Position> = None;
