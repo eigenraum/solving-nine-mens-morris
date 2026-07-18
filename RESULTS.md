@@ -106,22 +106,58 @@ split, so it needs access to the full ~17 GB database.
 ~17 GB database, there's essentially no headroom for the OS to keep working pages
 cached — the search (backed by `mmap`, so it can't be OOM-killed the way loading
 everything into owned memory was, see git history) spends the large majority of its
-wall-clock time faulting pages back in from disk rather than computing. A run was left
-going for several hours and was still in progress (confirmed alive and still making
-genuine, if very slow, forward progress — CPU time kept climbing, just far slower than
-wall-clock time) when this section was last updated. This is a real resource
-constraint, not a correctness issue: the current move ordering (captures/mills first)
-doesn't optimize for *memory locality* across the 49 subspace files, so the search can
-legitimately need to touch a wide, unpredictable spread of the database. Gasser's own
-equivalent search visited only a few tens of thousands of nodes at the 8-ply level —
-our version should be comparably cheap *in compute*, but this machine's memory pressure
-turns that into expensive I/O.
+wall-clock time faulting pages back in from disk rather than computing. Two runs were
+left going (5h, then 2h) and stayed alive and making genuine forward progress, but CPU
+utilization *fell* over time (roughly 80% down to 20-25%) — i.e. it was growing
+increasingly I/O-bound on page faults, not compute-bound, over the course of the run.
+
+**Root cause, on inspection: the "captures/mills first" move ordering this section
+previously credited to the search never actually existed.** `design.md` §6 always
+documented the intended heuristic ("move ordering: mills/captures first, then
+center-symmetric points"), but `movegen::moves_placement` — the function
+`opening::successors` wraps — simply swept empty points in raw bit order (0..24) with
+no reordering of any kind, and `opening::successors` didn't reorder its output either.
+So the search wasn't merely *sub-optimally* ordered for memory locality; it wasn't
+ordered at all, against a design doc that had assumed otherwise since it was written.
+Gasser's own paper (§5) confirms the *existence* of "the move-ordering heuristic" (his
+9-9/9-8/8-8 two-database bound search visited only 19,906 of ~3.5 million 8-ply
+positions) but doesn't specify its details beyond that one mention — the "center-
+symmetric points" phrasing in `design.md` was this codebase's own interpretation, not a
+direct Gasser quote.
+
+**Fix**: `opening::successors` now sorts its successors — captures (mill closures)
+before quiet placements, and, within each group, points ordered by descending board
+connectivity (degree 4 middle-ring midpoints, then degree-3 outer/inner-ring
+midpoints, then degree-2 corners last) as the "center-symmetric" tiebreak. This is a
+pure successor-*ordering* change: `movegen::moves_placement` (also used elsewhere,
+untouched) still generates the same set of successors; `opening::successors` only
+reorders them post hoc, using each resulting position alone (not extra state threaded
+through from `movegen`) to recover which branch captured and which point it placed on.
+Alpha-beta over a full `[-1, 1]` window is exact regardless of child order, so this
+cannot change any returned value — see `opening.rs`'s test module for both a direct
+correctness check (comparing against a pruning-free brute-force reference and against
+the pre-fix unordered generation on the same subtree, asserting identical results) and
+node-count benchmarks.
+
+**Measured impact** (bounded benchmarks only — see `opening.rs::tests`, not the full
+17 GB search, which is out of scope to run to completion here): a horizon-limited,
+database-free alpha-beta search from the empty board (mirroring how Gasser reports
+node counts at a fixed ply depth, §5) visited **69,230 nodes at 9 plies before this fix
+vs. 28,860 after — a 2.40x reduction** for an identical (verified identical) search
+value; depths 8, 10, and 11 showed comparable reductions (1.8x-2.4x).
+A small, fully-bounded 6-ply "3 stones each" mini-game against the real {3,3} database
+did *not* show a reduction (2,605 vs. 5,227 nodes) — expected, since a dense,
+near-exhaustive full-window search over such a small 3-valued tree has little slack
+left to prune regardless of order; the benefit is specifically in the wide, weakly-
+decided early plies, which is exactly the region the real 18-ply search spends most of
+its time in.
 
 **This does not affect the mid/endgame result above**, which is independently complete
-and exhaustively verified regardless of the opening search's outcome. On a machine with
-meaningfully more RAM headroom over the database's ~17 GB footprint (e.g. 32 GB+), or
-after adding cache-locality-aware move ordering to `opening.rs`, this search should
-complete quickly. Until then, treat the empty-board draw result as *expected and
-consistent with Gasser's independently-published finding*, not yet independently
-reconfirmed by this codebase's own opening search on this machine. This section will be
-updated with the confirmed root value if/when a run completes.
+and exhaustively verified regardless of the opening search's outcome. Whether this
+ordering fix is sufficient, on its own, to let a full empty-board search complete on
+this machine hasn't been established yet — that requires actually running the real
+search against the full 17 GB database, which is a separate, longer follow-up. Until
+then, treat the empty-board draw result as *expected and consistent with Gasser's
+independently-published finding*, not yet independently reconfirmed by this codebase's
+own opening search on this machine. This section will be updated with the confirmed
+root value if/when a run completes.

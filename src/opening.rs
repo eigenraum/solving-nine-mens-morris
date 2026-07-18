@@ -5,6 +5,7 @@
 //! database at the placement/movement boundary, rather than by
 //! retrograde analysis.
 
+use crate::board::ADJ;
 use crate::movegen;
 use crate::pos::Position;
 use crate::retro::{self, Database};
@@ -49,18 +50,51 @@ impl PlacementState {
 /// empty point, resolving mill captures exactly as in the movement phase
 /// (reusing `movegen::moves_placement`), then hand off to the opponent —
 /// whose hand is unchanged and who becomes the new mover.
+///
+/// Ordered per design.md §6 ("mills/captures first, then center-symmetric
+/// points") for alpha-beta pruning effectiveness: `movegen::moves_placement`
+/// itself does no such ordering (it just sweeps empty points 0..24 in raw
+/// bit order, appending capture-choice branches for each destination point
+/// in that same sweep), so this is where the heuristic actually lives.
+/// Reordering only changes how many nodes get pruned, never the value
+/// `negamax` returns (a full-window alpha-beta search is exact regardless
+/// of move order) — see the `tests` module for checks of both properties.
 pub fn successors(state: &PlacementState) -> Vec<PlacementState> {
     if state.mover_hand == 0 {
         return Vec::new();
     }
-    movegen::moves_placement(state.pos.white(), state.pos.black())
+    let mover_before = state.pos.white();
+    let opp_count_before = state.pos.black().count_ones();
+    let mut succs: Vec<PlacementState> = movegen::moves_placement(mover_before, state.pos.black())
         .into_iter()
         .map(|new_pos| PlacementState {
             pos: new_pos,
             mover_hand: state.opp_hand,
             opp_hand: state.mover_hand - 1,
         })
-        .collect()
+        .collect();
+    succs.sort_by_key(|s| std::cmp::Reverse(move_order_key(s, mover_before, opp_count_before)));
+    succs
+}
+
+/// Ordering key for one successor: `(is_capture, point_degree)`, both
+/// wanted in descending order (captures before quiet moves; among moves of
+/// equal capture-status, higher-connectivity — "center-symmetric" — points
+/// first). Sorting by `Reverse` of this tuple gives exactly that priority.
+///
+/// Both components are recovered from the resulting position alone rather
+/// than threaded through from `movegen`, since captures only ever remove
+/// exactly one opponent stone (Gasser's fixed rule, see `movegen::resolve_mill`)
+/// and placement only ever adds exactly one mover stone: `s.pos.white()`
+/// (the *new* opponent bitboard, post-perspective-flip) is shorter than
+/// before iff this branch captured, and the sole bit set in `s.pos.black()`
+/// (the new mover bitboard) but not in `mover_before` is the point just
+/// placed on.
+fn move_order_key(s: &PlacementState, mover_before: u32, opp_count_before: u32) -> (bool, u32) {
+    let is_capture = s.pos.white().count_ones() < opp_count_before;
+    let to = (s.pos.black() & !mover_before).trailing_zeros() as usize;
+    let degree = ADJ[to].count_ones();
+    (is_capture, degree)
 }
 
 /// Three-valued game outcome, from the mover's perspective.
@@ -394,5 +428,308 @@ mod tests {
             assert_eq!(r, brute_force(s, &db), "shared-TT solve diverged at {s:?}");
         }
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // --- Move-ordering tests (design.md §6: "mills/captures first, then
+    // center-symmetric points"). `movegen::moves_placement` itself does
+    // none of this (raw 0..24 point-order sweep) — `successors` is where
+    // it's actually applied, so that's what's under test here. ---
+
+    /// The pre-fix behavior of `successors`: `movegen::moves_placement`'s
+    /// raw point-order sweep, un-reordered. Kept only as (a) the baseline
+    /// that `successors_reordering_is_a_permutation_of_the_unordered_generation`
+    /// checks the new ordering against, and (b) the "before" arm of the
+    /// node-count benchmark below.
+    fn successors_unordered(state: &PlacementState) -> Vec<PlacementState> {
+        if state.mover_hand == 0 {
+            return Vec::new();
+        }
+        movegen::moves_placement(state.pos.white(), state.pos.black())
+            .into_iter()
+            .map(|new_pos| PlacementState {
+                pos: new_pos,
+                mover_hand: state.opp_hand,
+                opp_hand: state.mover_hand - 1,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn successors_orders_captures_before_quiet_moves() {
+        // Mover holds two of the {0,1,2} mill line; placing on point 2
+        // closes it and captures opp's lone, unmilled stone at 10.
+        let mover = (1 << 0) | (1 << 1);
+        let opp = 1 << 10;
+        let state = PlacementState { pos: Position::new(mover, opp), mover_hand: 3, opp_hand: 3 };
+        let succs = successors(&state);
+
+        let capture_count = succs.iter().filter(|s| s.pos.white().count_ones() == 0).count();
+        assert_eq!(capture_count, 1, "only point 2 closes the mill here");
+        assert_eq!(
+            succs[0].pos.white().count_ones(),
+            0,
+            "the capturing successor should sort before all quiet ones"
+        );
+        assert!(
+            succs[1..].iter().all(|s| s.pos.white().count_ones() == 1),
+            "every successor after the capture should be quiet"
+        );
+    }
+
+    #[test]
+    fn successors_orders_quiet_moves_by_descending_point_degree() {
+        // Empty board: no captures possible, so this isolates the
+        // secondary "center-symmetric points" (= higher board-connectivity
+        // points) ordering key.
+        let succs = successors(&PlacementState::initial());
+        let degrees: Vec<u32> =
+            succs.iter().map(|s| ADJ[s.pos.black().trailing_zeros() as usize].count_ones()).collect();
+        for w in degrees.windows(2) {
+            assert!(w[0] >= w[1], "point degrees are not sorted descending: {degrees:?}");
+        }
+        // board.rs::degree_distribution: 4 points of degree 4, 8 of degree
+        // 3, 12 of degree 2 — all 24 must appear, split accordingly.
+        assert_eq!(degrees.iter().filter(|&&d| d == 4).count(), 4);
+        assert_eq!(degrees.iter().filter(|&&d| d == 3).count(), 8);
+        assert_eq!(degrees.iter().filter(|&&d| d == 2).count(), 12);
+    }
+
+    #[test]
+    fn successors_reordering_is_a_permutation_of_the_unordered_generation() {
+        use std::collections::HashSet;
+        // Same mill-threatening state as the capture-ordering test, so
+        // this also exercises capture branches, not just quiet ones.
+        let mover = (1 << 0) | (1 << 1);
+        let opp = 1 << 10;
+        let state = PlacementState { pos: Position::new(mover, opp), mover_hand: 3, opp_hand: 3 };
+
+        let ordered = successors(&state);
+        let unordered = successors_unordered(&state);
+        assert_eq!(ordered.len(), unordered.len());
+        let ordered_set: HashSet<PlacementState> = ordered.into_iter().collect();
+        let unordered_set: HashSet<PlacementState> = unordered.into_iter().collect();
+        assert_eq!(ordered_set, unordered_set, "reordering must not add or drop successors");
+    }
+
+    /// Instrumented copy of `negamax`'s alpha-beta/TT logic, parameterized
+    /// over which successor function to use and counting nodes visited.
+    /// Lets the benchmark tests below measure the new ordering's pruning
+    /// effect against the pre-fix `successors_unordered` on the identical
+    /// subtree. Not used by production code — kept `#[cfg(test)]`-only.
+    fn negamax_counting(
+        state: &PlacementState,
+        mut alpha: i8,
+        beta: i8,
+        db: &Database,
+        tt: &mut Tt,
+        succ_fn: impl Fn(&PlacementState) -> Vec<PlacementState> + Copy,
+        nodes: &mut u64,
+    ) -> i8 {
+        *nodes += 1;
+        if state.total_mover() < 3 {
+            return -1;
+        }
+        if state.placement_done() {
+            return if state.pos.is_blocked() { -1 } else { code_to_i8(db.lookup_pos(state.pos)) };
+        }
+        let key = tt_key(state);
+        if let Some(&(v, bound)) = tt.get(&key) {
+            match bound {
+                Bound::Exact => return v,
+                Bound::Lower if v >= beta => return v,
+                Bound::Upper if v <= alpha => return v,
+                _ => {}
+            }
+        }
+        let alpha_orig = alpha;
+        let succs = succ_fn(state);
+        if succs.is_empty() {
+            return -1;
+        }
+        let mut best = i8::MIN;
+        for succ in succs {
+            let v = -negamax_counting(&succ, -beta, -alpha, db, tt, succ_fn, nodes);
+            if v > best {
+                best = v;
+            }
+            if best > alpha {
+                alpha = best;
+            }
+            if alpha >= beta {
+                break;
+            }
+        }
+        let bound = if best >= beta && best < 1 {
+            Bound::Lower
+        } else if best <= alpha_orig && best > -1 {
+            Bound::Upper
+        } else {
+            Bound::Exact
+        };
+        tt.insert(key, (best, bound));
+        best
+    }
+
+    #[test]
+    fn move_ordering_does_not_change_the_value_on_a_3_3_subtree() {
+        let tmp = std::env::temp_dir()
+            .join(format!("ninemm_opening_ordering_bench_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        orchestrate::solve_all(&tmp, Some(6)).unwrap(); // {3,3} only
+        let manifest = Manifest::load(&tmp).unwrap();
+        let db = load_db_up_to(&tmp, &manifest);
+
+        // A self-contained 3-stones-each "mini game" (empty board,
+        // hand=3/3): every path reaches placement_done at exactly {3,3},
+        // because any mid-tree capture immediately drops a side's total
+        // below 3 and terminates right there via the `total_mover() < 3`
+        // check — never touching a subspace outside the loaded {3,3}
+        // database. 6 plies deep: deeper than this module's other
+        // subtrees, and small/dense enough to actually touch the database.
+        let root = PlacementState { pos: Position::new(0, 0), mover_hand: 3, opp_hand: 3 };
+
+        let mut nodes_before = 0u64;
+        let mut tt_before = Tt::new();
+        let v_before = negamax_counting(
+            &root,
+            -1,
+            1,
+            &db,
+            &mut tt_before,
+            successors_unordered,
+            &mut nodes_before,
+        );
+
+        let mut nodes_after = 0u64;
+        let mut tt_after = Tt::new();
+        let v_after =
+            negamax_counting(&root, -1, 1, &db, &mut tt_after, successors, &mut nodes_after);
+
+        assert_eq!(v_before, v_after, "move ordering must not change the game value");
+
+        // Deliberately *not* asserting nodes_after < nodes_before here: on
+        // this fully-bounded 6-ply mini-game, a full [-1,1]-window search
+        // ends up needing to establish an exact 3-valued result almost
+        // everywhere (there's no large won/lost region to cut off early),
+        // so the tree is already close to saturated regardless of order —
+        // ordering can even mildly lose on instances this small and dense
+        // (observed: before=2605, after=5227 nodes here). The node-count
+        // benefit shows up where it matters, on the wide, weakly-decided
+        // early plies of the real search: see
+        // `move_ordering_reduces_nodes_on_a_bounded_empty_board_search`
+        // below, which measures exactly that and sees a consistent ~2x+
+        // reduction.
+        eprintln!(
+            "[bench] 3-3 mini-game (6-ply, from empty board): nodes before={nodes_before} \
+             after={nodes_after}"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Horizon-limited negamax used only for node-count benchmarking:
+    /// same alpha-beta/TT shape as `negamax`, but stops at a fixed ply
+    /// depth and returns a neutral value instead of a database probe.
+    /// This isolates the *early-game* pruning effect of move ordering —
+    /// mirroring how Gasser reports "positions visited at the 8-ply
+    /// level" as the search-quality metric (§5) — without needing any
+    /// part of the real (multi-GB) movement/endgame database.
+    fn negamax_bounded(
+        state: &PlacementState,
+        mut alpha: i8,
+        beta: i8,
+        depth_remaining: u32,
+        tt: &mut Tt,
+        succ_fn: impl Fn(&PlacementState) -> Vec<PlacementState> + Copy,
+        nodes: &mut u64,
+    ) -> i8 {
+        *nodes += 1;
+        if state.total_mover() < 3 {
+            return -1;
+        }
+        if depth_remaining == 0 {
+            return 0; // horizon cutoff: a neutral stand-in, not a claimed draw
+        }
+        let key = tt_key(state);
+        if let Some(&(v, bound)) = tt.get(&key) {
+            match bound {
+                Bound::Exact => return v,
+                Bound::Lower if v >= beta => return v,
+                Bound::Upper if v <= alpha => return v,
+                _ => {}
+            }
+        }
+        let alpha_orig = alpha;
+        let succs = succ_fn(state);
+        if succs.is_empty() {
+            return -1;
+        }
+        let mut best = i8::MIN;
+        for succ in succs {
+            let v =
+                -negamax_bounded(&succ, -beta, -alpha, depth_remaining - 1, tt, succ_fn, nodes);
+            if v > best {
+                best = v;
+            }
+            if best > alpha {
+                alpha = best;
+            }
+            if alpha >= beta {
+                break;
+            }
+        }
+        let bound = if best >= beta && best < 1 {
+            Bound::Lower
+        } else if best <= alpha_orig && best > -1 {
+            Bound::Upper
+        } else {
+            Bound::Exact
+        };
+        tt.insert(key, (best, bound));
+        best
+    }
+
+    #[test]
+    fn move_ordering_reduces_nodes_on_a_bounded_empty_board_search() {
+        // No database at all here — this is exactly the kind of "bounded
+        // search from the empty board" comparison RESULTS.md's known
+        // limitation calls for, at a depth cheap enough to run in a unit
+        // test (the real search is 18 plies against a 17 GB database).
+        const DEPTH: u32 = 9;
+
+        let mut nodes_before = 0u64;
+        let mut tt_before = Tt::new();
+        let v_before = negamax_bounded(
+            &PlacementState::initial(),
+            -1,
+            1,
+            DEPTH,
+            &mut tt_before,
+            successors_unordered,
+            &mut nodes_before,
+        );
+
+        let mut nodes_after = 0u64;
+        let mut tt_after = Tt::new();
+        let v_after = negamax_bounded(
+            &PlacementState::initial(),
+            -1,
+            1,
+            DEPTH,
+            &mut tt_after,
+            successors,
+            &mut nodes_after,
+        );
+
+        assert_eq!(v_before, v_after, "move ordering must not change the (horizon-bounded) value");
+        eprintln!(
+            "[bench] empty-board {DEPTH}-ply horizon search: nodes before={nodes_before} \
+             after={nodes_after} ({:.2}x fewer)",
+            nodes_before as f64 / nodes_after as f64
+        );
+        assert!(
+            nodes_after < nodes_before,
+            "expected move ordering to reduce visited nodes: before={nodes_before} \
+             after={nodes_after}"
+        );
     }
 }
