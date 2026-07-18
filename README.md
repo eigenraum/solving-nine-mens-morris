@@ -15,10 +15,17 @@ yourself, see [`getting-started.md`](getting-started.md).
 
 ## Result
 
-Nine Men's Morris is a **draw** with perfect play — matching Gasser's original result,
-reproduced here independently. See [`RESULTS.md`](RESULTS.md) for the verified
-statistics (win/loss/draw tallies and maximum depths per subspace) once the full solve
-has completed and been checksummed.
+The complete mid/endgame database (all 28 material pairs, 3–9 stones per side) is
+solved and **exhaustively verified** — every one of ~8.9 billion canonical states
+checked against its own successors, zero mismatches. See [`RESULTS.md`](RESULTS.md) for
+the full statistics (win/loss/draw tallies and maximum depths per subspace).
+
+The headline claim — Nine Men's Morris is a **draw** with perfect play, matching
+Gasser's original result — depends on one more step: an 18-ply alpha-beta search from
+the empty board over that database. That search is memory-intensive (~17 GB) and was
+still completing on the development machine as of the last update; see
+[`RESULTS.md`](RESULTS.md) for status and the confirmed value once available. It does
+not affect the mid/endgame result, which stands independently.
 
 ## How this differs from Gasser's approach
 

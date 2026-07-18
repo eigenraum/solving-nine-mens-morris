@@ -133,6 +133,46 @@ pub fn read_subspace_verified(dir: &Path, manifest: &Manifest, w: usize, b: usiz
     Ok(data)
 }
 
+/// Memory-map a subspace file read-only, verifying its size against the
+/// manifest (but not its checksum — that would require reading every
+/// byte, defeating the point of mapping lazily; callers that need the
+/// integrity guarantee should have run `verify` beforehand, or checksum
+/// once at load time via [`read_subspace_verified`] on a smaller sample).
+/// Prefer this over `read_subspace*` whenever a caller may need several
+/// (or all) subspaces resident at once — e.g. the opening search, which
+/// can reach nearly any material split — since it lets the OS page
+/// unused regions out under memory pressure instead of forcing everything
+/// into RAM simultaneously. The full database is on the order of the
+/// available RAM on a typical machine; loading all of it as owned `Vec`s
+/// at once is a real way to OOM.
+pub fn mmap_subspace(dir: &Path, manifest: &Manifest, w: usize, b: usize) -> Result<memmap2::Mmap> {
+    let entry = manifest
+        .find(w, b)
+        .with_context(|| format!("no manifest entry for ({w},{b})"))?;
+    let path = subspace_path(dir, w, b);
+    let file = File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    let meta = file.metadata()?;
+    if meta.len() != entry.size * 2 {
+        bail!(
+            "subspace ({w},{b}): file is {} bytes, manifest expects {} (size {})",
+            meta.len(),
+            entry.size * 2,
+            entry.size
+        );
+    }
+    // Safety: the file is not expected to be mutated concurrently by
+    // another process while mapped; this tool never does so itself.
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
+    Ok(mmap)
+}
+
+/// Read a single `u16` out of a mapped subspace file at index `idx`.
+#[inline]
+pub fn mmap_get_u16(mmap: &memmap2::Mmap, idx: u64) -> u16 {
+    let offset = idx as usize * 2;
+    u16::from_ne_bytes([mmap[offset], mmap[offset + 1]])
+}
+
 /// True iff subspace (w,b) is already solved on disk with a checksum
 /// matching the manifest (so orchestration can skip re-solving it).
 pub fn is_solved(dir: &Path, manifest: &Manifest, w: usize, b: usize) -> bool {

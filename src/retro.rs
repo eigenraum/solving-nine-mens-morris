@@ -90,11 +90,33 @@ pub fn is_win(code: u16) -> bool {
     code != DRAW && code % 2 == 1
 }
 
+/// One subspace's backing storage: either fully resident (used by the
+/// retrograde solver itself, whose per-pair working set is small — at
+/// most two dependency subspaces at a time, see persist.rs's module
+/// docs) or memory-mapped (used by callers like the opening search that
+/// may need many or all subspaces at once, where holding everything as
+/// owned `Vec`s would risk exhausting RAM — the full database is on the
+/// order of the machine's total RAM).
+enum Backing {
+    Owned(Vec<u16>),
+    Mapped(memmap2::Mmap),
+}
+
+impl Backing {
+    #[inline]
+    fn get(&self, idx: u64) -> u16 {
+        match self {
+            Backing::Owned(v) => v[idx as usize],
+            Backing::Mapped(m) => crate::persist::mmap_get_u16(m, idx),
+        }
+    }
+}
+
 /// A registry of fully-solved subspaces, used for cross-pair capture
 /// lookups (always into strictly smaller pairs, per the solve DAG).
 #[derive(Default)]
 pub struct Database {
-    arrays: HashMap<(u8, u8), Vec<u16>>,
+    arrays: HashMap<(u8, u8), Backing>,
 }
 
 impl Database {
@@ -103,7 +125,11 @@ impl Database {
     }
 
     pub fn insert(&mut self, w: usize, b: usize, values: Vec<u16>) {
-        self.arrays.insert((w as u8, b as u8), values);
+        self.arrays.insert((w as u8, b as u8), Backing::Owned(values));
+    }
+
+    pub fn insert_mmap(&mut self, w: usize, b: usize, mmap: memmap2::Mmap) {
+        self.arrays.insert((w as u8, b as u8), Backing::Mapped(mmap));
     }
 
     pub fn has(&self, w: usize, b: usize) -> bool {
@@ -111,7 +137,7 @@ impl Database {
     }
 
     pub fn get(&self, sub: SubspaceId, idx: u64) -> u16 {
-        self.arrays[&(sub.w, sub.b)][idx as usize]
+        self.arrays[&(sub.w, sub.b)].get(idx)
     }
 
     /// Look up a position's value; it must already live in a registered

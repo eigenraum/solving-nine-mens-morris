@@ -51,6 +51,15 @@ enum Commands {
         #[arg(long, default_value = "white")]
         human: String,
     },
+    /// Solve the 18-ply opening via alpha-beta search from the empty
+    /// board (design.md §6), reporting the game-theoretic value: Nine
+    /// Men's Morris' headline result. Requires the full 49-subspace
+    /// database; maps it read-only rather than loading it into RAM (the
+    /// database is on the order of the machine's total RAM).
+    SolveOpening {
+        #[arg(long, default_value = "db")]
+        dir: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -114,6 +123,24 @@ fn main() -> anyhow::Result<()> {
         Commands::Play { dir, human } => {
             run_play(&dir, &human)?;
         }
+        Commands::SolveOpening { dir } => {
+            use ninemm::opening;
+            use ninemm::persist::{self, Manifest};
+            use ninemm::retro::Database;
+            use std::time::Instant;
+
+            let manifest = Manifest::load(&dir)?;
+            eprintln!("mapping {} subspaces...", manifest.entries.len());
+            let mut db = Database::new();
+            for e in &manifest.entries {
+                let mmap = persist::mmap_subspace(&dir, &manifest, e.w as usize, e.b as usize)?;
+                db.insert_mmap(e.w as usize, e.b as usize, mmap);
+            }
+            let t0 = Instant::now();
+            let value = opening::solve_from_empty_board(&db);
+            eprintln!("opening search finished in {:?}", t0.elapsed());
+            println!("Empty board value: {value:?}");
+        }
         Commands::DbStats { dir } => {
             use ninemm::index::SubspaceId;
             use ninemm::persist::{self, Manifest};
@@ -173,12 +200,16 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
             dir.display()
         );
     }
+    // Memory-mapped, not fully loaded: the whole database is on the order
+    // of the machine's total RAM, so reading all 49 subspaces into owned
+    // Vecs at once risks an OOM kill. mmap lets the OS page in only what
+    // the search actually touches.
     let mut db = Database::new();
     for e in &manifest.entries {
-        let data = persist::read_subspace_verified(dir, &manifest, e.w as usize, e.b as usize)?;
-        db.insert(e.w as usize, e.b as usize, data);
+        let mmap = persist::mmap_subspace(dir, &manifest, e.w as usize, e.b as usize)?;
+        db.insert_mmap(e.w as usize, e.b as usize, mmap);
     }
-    println!("Loaded {} subspaces. You are {}.", manifest.entries.len(), if human_is_white { "White" } else { "Black" });
+    println!("Mapped {} subspaces. You are {}.", manifest.entries.len(), if human_is_white { "White" } else { "Black" });
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
