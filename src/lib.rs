@@ -8,5 +8,6 @@ pub mod persist;
 pub mod play;
 pub mod pos;
 pub mod retro;
+pub mod server;
 pub mod symmetry;
 pub mod verify;

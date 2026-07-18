@@ -95,6 +95,36 @@ mid-game).
   choose which enemy stone to remove.
 - Pass `--human black` to play second.
 
+## Browser UI
+
+A browser-based alternative to `play`, with an optional evaluation overlay (see
+[`ui-design.md`](ui-design.md) for the full design and [`ui-implementation.md`](ui-implementation.md)
+for the build plan):
+
+```sh
+./target/release/ninemm serve --dir db --warm
+```
+
+Then open `http://127.0.0.1:8080/` in a browser. Click a stone/square to move, or a
+destination to place; a mill closure with more than one legal capture prompts you to
+pick a capturable stone on the board. Tick **Show evaluation** to see the value of the
+current position and of every legal move (win/draw/loss, with ply counts in the
+movement phase), color-coded on the board and listed in the move panel.
+
+- Like `play`, placement-phase (opening) analysis needs the **complete** 49-subspace
+  database; movement-phase analysis works with whatever subspaces are present.
+- `--warm` runs the empty-board opening search at startup so the first placement
+  analysis is instant instead of taking up to a few minutes; omit it to defer that
+  cost to the first request.
+- `--bind <addr>` to change the listen address (defaults to `127.0.0.1:8080`, local
+  analysis tool — there's no auth).
+- `--allow-partial` serves whatever subspaces exist instead of requiring all 49
+  (movement-phase analysis only; placement analysis is refused) — useful for trying
+  the UI against a fast partial solve, e.g. `solve --dir devdb --max-total 7`.
+- RAM: loading the full database takes as much memory as `play` does (see
+  Prerequisites above); a `--mmap` mode for smaller machines is not yet implemented
+  (see `ui-implementation.md` M6).
+
 ## Other useful commands
 
 ```sh
