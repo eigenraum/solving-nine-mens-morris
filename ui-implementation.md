@@ -680,51 +680,52 @@ at the third occurrence. Commit.
 
 **Done when**: checklist passes; docs updated; clippy/fmt/tests clean. Commit.
 
-## M6 (optional) — `--mmap` mode for small-RAM machines
+## M6 — mmap loading for `serve` (implemented; it is the default, not a flag)
+
+Originally planned as an optional `--mmap` flag; shipped as the *only* load path
+after the owned-`Vec` default proved unusable in practice: on an 18 GiB machine the
+17 GiB load pushed the whole system into swap, startup kept the port closed for
+minutes (connection refused), and every later analysis thrashed — the UI read as
+"terribly slow or dead". Two server-side changes landed with it, beyond the original
+plan:
+
+- **Bind before `--warm`.** The socket now opens before the empty-board warm solve;
+  the warm solve runs holding the TT lock, so the page loads instantly and only
+  placement analyses wait for warming to finish.
+- **Worker pool instead of the single request loop.** A few `tiny_http` worker
+  threads `recv()` from the shared server; the TT is behind a `Mutex` locked once
+  per placement analysis (movement analyses never touch it). A slow placement
+  analysis can no longer block `GET /` or `/api/meta`. See ui-design.md §3.1
+  "Threading".
 
 Only milestone that touches solver code; the change is confined to storage plumbing
 (no algorithmic code), but still follow `readme-agent.md`: run the full release test
 suite afterwards, and if anything in `retro.rs` beyond the `Database` struct seems to
 need changing, stop — it does not.
 
-1. In `retro.rs`, generalize `Database`'s per-subspace storage:
+1. In `retro.rs`, generalize `Database`'s per-subspace storage. Shipped as the
+   `Backing` enum (`Owned(Vec<u16>)` / `Mapped(memmap2::Mmap)`) with per-index
+   access through `persist::mmap_get_u16` rather than an unsafe `as_slice()` view.
+   `insert(w, b, values: Vec<u16>)` is kept (every existing call site compiles
+   unchanged) alongside `insert_mmap(w, b, map: memmap2::Mmap)`.
 
-   ```rust
-   enum Slab { Owned(Vec<u16>), Mapped(memmap2::Mmap) }
-   impl Slab {
-       fn as_slice(&self) -> &[u16] {
-           match self {
-               Slab::Owned(v) => v,
-               Slab::Mapped(m) => {
-                   // Mmaps are page-aligned, so u16 alignment always holds;
-                   // native-endian, same tradeoff as persist.rs::as_bytes.
-                   debug_assert!(m.len() % 2 == 0 && (m.as_ptr() as usize) % 2 == 0);
-                   unsafe { std::slice::from_raw_parts(m.as_ptr() as *const u16, m.len() / 2) }
-               }
-           }
-       }
-   }
-   ```
+2. In `persist.rs`, `mmap_subspace_verified(dir, manifest, w, b) ->
+   Result<memmap2::Mmap>`: maps read-only via `mmap_subspace` (which checks
+   `len == entry.size * 2`), then verifies the manifest checksum by hashing the
+   mapped bytes directly (identical to `xxh3_of` over the decoded `u16`s, since the
+   files are the native-endian `as_bytes` image; one streaming pass through the
+   page cache).
 
-   Keep `insert(w, b, values: Vec<u16>)` (wrap in `Slab::Owned`; every existing call
-   site compiles unchanged), add `insert_mmap(w, b, map: memmap2::Mmap)`, and route
-   `get`'s slice access through `as_slice()`.
-
-2. In `persist.rs`, add `read_subspace_mmap_verified(dir, manifest, w, b) ->
-   Result<memmap2::Mmap>`: open the file, check `len == entry.size * 2`, map
-   read-only (`memmap2::Mmap::map`), verify `xxh3_of` over the mapped `u16` view
-   against the manifest (one streaming pass through the page cache), and return the
-   map. Model the checks on `read_subspace_verified` directly above it.
-
-3. `serve --mmap`: `load_db` uses the mmap reader; `/api/meta` reports
+3. `serve`: `load_db` always uses the mmap reader; `/api/meta` reports
    `"mmap": true`. Everything downstream (`analyze`, `play::best_*`, the opening
    search) is unchanged — they only see `Database`.
 
-**Done when**: `cargo test --release` fully green (proves `Slab::Owned` changed
-nothing); M1's test suite passes against an mmap-loaded dev database (add one test
-loading via `insert_mmap`); with the full database, `serve --mmap` stays under a few
-hundred MB RSS at startup on a cold cache and analyses are still instant in the
-movement phase. Commit.
+**Done when**: `cargo test --release` fully green (proves `Backing::Owned` changed
+nothing); M1's test suite passes against an mmap-loaded dev database (`load_db` now
+maps, so every server test exercises `insert_mmap`); with the full database, `serve`
+binds within ~30s (the checksum pass), its resident set is clean file-backed pages
+the OS can reclaim at will (no swap growth from the server's own footprint), and
+analyses are still instant in the movement phase. Commit.
 
 ---
 

@@ -1,0 +1,2 @@
+{"phase":"placement","result":null,"value":{"outcome":"draw","plies":null},"moves":[{"from":null,"to":9,"capture":null,"curl -s -m 300 -X POST http://127.0.0.1:8081/api/analyze -d   0,00s user 0,00s system 0% cpu 11,559 total
+head -c 120  0,00s user 0,00s system 0% cpu 11,558 total

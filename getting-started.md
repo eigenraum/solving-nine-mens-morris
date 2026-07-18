@@ -142,15 +142,17 @@ movement phase), color-coded on the board and listed in the move panel.
   database; movement-phase analysis works with whatever subspaces are present.
 - `--warm` runs the empty-board opening search at startup so the first placement
   analysis is instant instead of taking up to a few minutes; omit it to defer that
-  cost to the first request.
+  cost to the first request. The server starts listening *before* the warm search
+  runs — the page loads immediately, and only placement analyses wait for warming.
 - `--bind <addr>` to change the listen address (defaults to `127.0.0.1:8080`, local
   analysis tool — there's no auth).
 - `--allow-partial` serves whatever subspaces exist instead of requiring all 49
   (movement-phase analysis only; placement analysis is refused) — useful for trying
   the UI against a fast partial solve, e.g. `solve --dir devdb --max-total 7`.
-- RAM: loading the full database takes as much memory as `play` does (see
-  Prerequisites above); a `--mmap` mode for smaller machines is not yet implemented
-  (see `ui-implementation.md` M6).
+- RAM: the server memory-maps the database read-only (verifying checksums once at
+  startup) rather than loading it, so it stays at a small RSS and runs fine on
+  machines with far less RAM than the 17 GiB database (see `ui-implementation.md`
+  M6). Analyses touch only the pages they need, kept warm by the OS page cache.
 
 ## Other useful commands
 
