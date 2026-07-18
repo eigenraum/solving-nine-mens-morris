@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Nine Men's Morris — local play &amp; training tool</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #1b1b1b; color: #eee; display: flex; gap: 32px; padding: 24px; flex-wrap: wrap; }
+  #board-wrap { position: relative; }
+  svg { background: #2a2a2a; border-radius: 8px; }
+  .line { stroke: #999; stroke-width: 2; }
+  .point { fill: #444; stroke: #999; stroke-width: 2; cursor: pointer; }
+  .point:hover { fill: #666; }
+  .point.selected { fill: #6a8; }
+  .stone-w { fill: #f2f2f2; stroke: #000; stroke-width: 1.5; }
+  .stone-b { fill: #222; stroke: #ccc; stroke-width: 1.5; }
+  #status { font-size: 1.1em; margin-bottom: 12px; }
+  #evalPanel { min-width: 320px; }
+  .move-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: 0.85em; }
+  .bar { display: flex; width: 160px; height: 14px; border-radius: 3px; overflow: hidden; background: #333; }
+  .bar-loss { background: #c0392b; }
+  .bar-draw { background: #7f8c8d; }
+  .bar-win { background: #27ae60; }
+  button { background: #333; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 6px 12px; cursor: pointer; margin-right: 8px; }
+  button:hover { background: #444; }
+  a { color: #6cf; }
+</style>
+</head>
+<body>
+  <div id="board-wrap">
+    <div id="status">Loading model…</div>
+    <svg id="board" width="480" height="480" viewBox="0 0 480 480"></svg>
+    <div style="margin-top: 12px;">
+      <button id="resetBtn">New game</button>
+      <label><input type="checkbox" id="humanFirst" checked /> Human plays White (first)</label>
+    </div>
+    <p style="max-width: 480px; font-size: 0.85em; color: #aaa;">
+      Placement phase (first 9 stones each side) uses a simple heuristic, not the
+      trained model — see <code>design-nn.md</code> §10. Movement phase uses the
+      compressed value network with test-time symmetry averaging and a shallow
+      search.
+    </p>
+  </div>
+  <div id="evalPanel">
+    <h3>Move evaluations</h3>
+    <div id="evalList">—</div>
+  </div>
+
+  <script type="module" src="../dist/demo.js"></script>
+</body>
+</html>

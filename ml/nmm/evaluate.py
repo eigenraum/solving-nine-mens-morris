@@ -241,9 +241,11 @@ def evaluate_move_quality(
 class SoakResult:
     games: int = 0
     model_losses_from_nonlost_start: int = 0
-    draws: int = 0
+    draws: int = 0  # includes games that hit max_plies -- no repetition
+    # detection is implemented (design-nn.md follows readme-database.md's
+    # convention that repetition is modeled implicitly by the draw class),
+    # so a capped-out game is the expected way a genuine draw manifests here.
     model_wins: int = 0
-    max_plies_hit: int = 0
 
 
 def play_soak_match(
@@ -310,10 +312,21 @@ def run_soak(
         if not symmetry.is_canonical(mover, opp):
             continue
         cls, _ = db.lookup(mover, opp)
-        if cls == LOSS:
-            continue  # already lost for the side to move; not a fair test
 
         model_first = bool(rng.integers(0, 2))
+        # `cls` is the class of `mover` (whoever moves first) from its own
+        # perspective. Fairness must be judged relative to the *model*, not
+        # relative to whoever happens to move first: if the model moves
+        # first, a LOSS start is unfair to it (skip); if the opponent moves
+        # first, a WIN start for the opponent is exactly as unfair to the
+        # model (the opponent can force a win against any defense) -- so the
+        # skip condition flips with `model_first`. Getting this backwards
+        # silently turns "perfect vs. perfect" soak games into games the
+        # model was always going to lose regardless of play quality.
+        unfair_to_model = cls == LOSS if model_first else cls == WIN
+        if unfair_to_model:
+            continue
+
         outcome = play_soak_match(db, evaluator, mover, opp, model_first, max_plies)
         result.games += 1
         if outcome == "model_loss":
