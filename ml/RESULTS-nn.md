@@ -192,15 +192,17 @@ just the root -- both wrong (engine.ts deliberately restricts TTA to the root) a
 extremely slow (16x cost multiplied through an exponential search: one single move
 decision at depth 2 was still running after several minutes). Fixed by auto-deriving
 a non-TTA sibling evaluator for search interior nodes; a single depth-2 decision then
-takes well under a second. A full depth-2 (or depth-1) soak-match comparison at
-matching scale to the depth-0 baseline above was not completed in this session's
-remaining time budget -- CPU-only negamax search over a 15-subspace mixed position
-pool is slow enough (branching factor spikes on 3-stone jump-heavy positions) that
-150 games at depth 2 didn't finish in a reasonable wait. This is the concrete
-next-step experiment for whoever picks up N7: **does search close the 6% soak-loss
-gap, and by how much at depth 1 vs. depth 2?** The plumbing is in place
-(`run_soak(..., search_depth=N)`); it just needs a GPU or more CPU-hours than this
-session had left to answer at real scale.
+takes well under a second, but negamax over a mixed 15-subspace position pool (some
+3-stone/jump-heavy positions have branching factors in the dozens) is still slow
+enough on CPU that a depth-2 run at matching 150-game scale did not finish in this
+session. A smaller depth-1 run did (40 games, max 80 plies, seed 5):
+**2/40 (5%) model losses**, vs. the depth-0 baseline's 9/150 (6%) above -- directionally
+consistent with search helping, but the sample is too small (40 vs. 150 games, plus a
+different seed/max_plies) to call this a confirmed improvement rather than noise.
+This is the concrete next-step experiment for whoever picks up N7: **does search
+close the soak-loss gap at matching scale, and by how much at depth 1 vs. depth 2?**
+The plumbing is in place (`run_soak(..., search_depth=N)`); it just needs a GPU or
+more CPU-hours than this session had left to answer with real statistical confidence.
 
 ## N8 (export + web runtime) — status: done, gated
 
