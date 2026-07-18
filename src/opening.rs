@@ -71,6 +71,20 @@ pub enum Value {
     Win,
 }
 
+/// How a transposition-table value relates to the true game value.
+/// Fail-soft alpha-beta only proves a bound when it cuts off (Lower)
+/// or fails low (Upper); probing code must not treat bounds as exact.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bound {
+    Exact,
+    Lower,
+    Upper,
+}
+
+/// The opening-search transposition table: canonical `(position,
+/// mover_hand, opp_hand)` key → (value, bound).
+pub type Tt = HashMap<(Position, u8, u8), (i8, Bound)>;
+
 fn from_i8(v: i8) -> Value {
     match v {
         -1 => Value::Loss,
@@ -105,17 +119,11 @@ fn tt_key(state: &PlacementState) -> (Position, u8, u8) {
 /// movement-phase subspace reachable from `state` (in practice: the full
 /// solved database, since the placement DAG can reach nearly any
 /// material split).
-pub fn solve(state: &PlacementState, db: &Database, tt: &mut HashMap<(Position, u8, u8), i8>) -> Value {
+pub fn solve(state: &PlacementState, db: &Database, tt: &mut Tt) -> Value {
     from_i8(negamax(state, -1, 1, db, tt))
 }
 
-pub(crate) fn negamax(
-    state: &PlacementState,
-    mut alpha: i8,
-    beta: i8,
-    db: &Database,
-    tt: &mut HashMap<(Position, u8, u8), i8>,
-) -> i8 {
+pub(crate) fn negamax(state: &PlacementState, mut alpha: i8, beta: i8, db: &Database, tt: &mut Tt) -> i8 {
     if state.total_mover() < 3 {
         return -1;
     }
@@ -129,9 +137,15 @@ pub(crate) fn negamax(
     }
 
     let key = tt_key(state);
-    if let Some(&v) = tt.get(&key) {
-        return v;
+    if let Some(&(v, bound)) = tt.get(&key) {
+        match bound {
+            Bound::Exact => return v,
+            Bound::Lower if v >= beta => return v,
+            Bound::Upper if v <= alpha => return v,
+            _ => {}
+        }
     }
+    let alpha_orig = alpha;
 
     let succs = successors(state);
     if succs.is_empty() {
@@ -156,14 +170,25 @@ pub(crate) fn negamax(
         }
     }
 
-    tt.insert(key, best);
+    // Classify what fail-soft alpha-beta actually proved. In this
+    // 3-valued domain a lower bound of 1 and an upper bound of -1 are
+    // the domain extremes, hence exact; the only genuinely inexact
+    // stores are "0, at least" and "0, at most".
+    let bound = if best >= beta && best < 1 {
+        Bound::Lower
+    } else if best <= alpha_orig && best > -1 {
+        Bound::Upper
+    } else {
+        Bound::Exact
+    };
+    tt.insert(key, (best, bound));
     best
 }
 
 /// Convenience: the game-theoretic value of the empty board (design.md's
 /// headline result). Builds a fresh transposition table.
 pub fn solve_from_empty_board(db: &Database) -> Value {
-    let mut tt = HashMap::new();
+    let mut tt = Tt::new();
     solve(&PlacementState::initial(), db, &mut tt)
 }
 
@@ -294,6 +319,80 @@ mod tests {
         let ab = negamax(&state, -1, 1, &db, &mut tt);
         let bf = brute_force(&state, &db);
         assert_eq!(ab, bf, "alpha-beta and brute-force minimax disagree");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn persistent_cache_gives_identical_results_to_an_empty_tt() {
+        use crate::opening_cache;
+
+        let tmp = std::env::temp_dir()
+            .join(format!("ninemm_opening_cache_identical_test_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        orchestrate::solve_all(&tmp, Some(6)).unwrap(); // {3,3} only
+        let manifest = Manifest::load(&tmp).unwrap();
+        let db = load_db_up_to(&tmp, &manifest);
+
+        let state_a = PlacementState {
+            pos: Position::new((1 << 3) | (1 << 8), 1 << 16),
+            mover_hand: 1,
+            opp_hand: 2,
+        };
+        let mut tt_a = Tt::new();
+        let v_a = solve(&state_a, &db, &mut tt_a);
+        assert_eq!(v_a, from_i8(brute_force(&state_a, &db)));
+
+        let fingerprint = opening_cache::db_fingerprint(&manifest);
+        opening_cache::write_cache(&tmp, fingerprint, &tt_a, 0).unwrap();
+        let cached = opening_cache::load_or_empty(&tmp, &manifest);
+        assert!(!cached.is_empty());
+
+        // A different prior search's TT genuinely exercises cache hits
+        // for a state that was not itself the previous root, rather than
+        // just replaying the same run against itself.
+        let state_b = successors(&state_a)[0];
+        let mut cached = cached;
+        let with_cache = solve(&state_b, &db, &mut cached);
+        let without_cache = solve(&state_b, &db, &mut Tt::new());
+        assert_eq!(with_cache, without_cache);
+        assert_eq!(with_cache, from_i8(brute_force(&state_b, &db)));
+
+        // Re-loading a fresh copy of the cache still reproduces v_a.
+        let mut reloaded = opening_cache::load_or_empty(&tmp, &manifest);
+        assert_eq!(solve(&state_a, &db, &mut reloaded), v_a);
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn tt_reuse_across_solves_never_changes_results() {
+        let tmp =
+            std::env::temp_dir().join(format!("ninemm_opening_ttreuse_test_{}", std::process::id()));
+        std::fs::remove_dir_all(&tmp).ok();
+        orchestrate::solve_all(&tmp, Some(6)).unwrap(); // {3,3} only
+        let manifest = Manifest::load(&tmp).unwrap();
+        let db = load_db_up_to(&tmp, &manifest);
+
+        // Same funnel-to-{3,3} region the existing tests use.
+        let root = PlacementState {
+            pos: Position::new((1 << 3) | (1 << 8), 1 << 16),
+            mover_hand: 1,
+            opp_hand: 2,
+        };
+        // Collect root, its children, and grandchildren.
+        let mut states = vec![root];
+        for s in successors(&root) {
+            states.push(s);
+            states.extend(successors(&s));
+        }
+        // Solve all of them sharing ONE table, in order...
+        let mut shared = Tt::new();
+        let shared_results: Vec<i8> =
+            states.iter().map(|s| negamax(s, -1, 1, &db, &mut shared)).collect();
+        // ...and each against the TT-free, pruning-free reference.
+        for (s, &r) in states.iter().zip(&shared_results) {
+            assert_eq!(r, brute_force(s, &db), "shared-TT solve diverged at {s:?}");
+        }
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

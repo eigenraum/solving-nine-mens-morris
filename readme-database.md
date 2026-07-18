@@ -190,3 +190,19 @@ XXH3-64 hash (hex-encoded, lowercase) of the raw file bytes — verify it before
 a file. A subspace is present iff both its file exists with the manifest-declared size
 *and* its checksum matches; the solve is only complete once all 49 `(w,b)` combinations
 for `w,b` in `3..=9` are present.
+
+## 8. `opening_cache.bin` (not part of this spec's data)
+
+The database directory may also contain `opening_cache.bin`: a derived, optional
+performance cache of shallow opening-search results (`design-opening-phase.md`), built
+by `ninemm build-opening-cache` and consumed only by this repository's own placement
+search — **not needed to use the movement-phase database described above**, and safe
+to ignore or delete if you're implementing your own reader against this spec.
+
+For completeness, its format: an 8-byte magic/version (`b"NMMOPEN1"`), an 8-byte
+database fingerprint (an XXH3-64 hash over every manifest entry's `(w, b, xxh3)`,
+sorted, tying the cache to one exact state of the `.bin` files above), an 8-byte entry
+count, and an 8-byte XXH3-64 checksum of the entries, followed by that many 9-byte
+entries (8-byte packed key, 1-byte packed value) sorted ascending by key. A cache whose
+fingerprint doesn't match the current manifest is stale and is ignored by every
+consumer that reads it — re-run `build-opening-cache` after re-solving any pair.

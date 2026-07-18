@@ -13,13 +13,13 @@
 use crate::board;
 use crate::movegen;
 use crate::opening::{self, PlacementState};
+use crate::opening_cache;
 use crate::persist::{self, Manifest};
 use crate::play;
 use crate::pos::{bits, Position};
 use crate::retro::{self, Database};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,7 @@ const INDEX_HTML: &str = include_str!("../ui/index.html");
 /// the server process (see `ui-design.md` §6): every analysis warms every
 /// later one, which is what makes placement-phase analyses fast after the
 /// first probe of any given subtree.
-pub type Tt = HashMap<(Position, u8, u8), i8>;
+pub type Tt = crate::opening::Tt;
 
 pub struct ServeOptions {
     pub bind: String,
@@ -50,6 +50,7 @@ pub struct Loaded {
     /// True iff all 49 `(w,b)` subspaces for `w,b` in `3..=9` are loaded.
     pub complete: bool,
     pub subspaces: usize,
+    pub manifest: Manifest,
 }
 
 /// Load the database exactly as `ninemm play` does: read the manifest,
@@ -80,11 +81,8 @@ pub fn load_db(dir: &Path, allow_partial: bool) -> Result<Loaded> {
             .with_context(|| format!("loading subspace ({},{})", e.w, e.b))?;
         db.insert(e.w as usize, e.b as usize, data);
     }
-    Ok(Loaded {
-        db,
-        complete,
-        subspaces: manifest.entries.len(),
-    })
+    let subspaces = manifest.entries.len();
+    Ok(Loaded { db, complete, subspaces, manifest })
 }
 
 pub fn serve(dir: &Path, opts: &ServeOptions) -> Result<()> {
@@ -99,7 +97,7 @@ pub fn serve(dir: &Path, opts: &ServeOptions) -> Result<()> {
         }
     );
 
-    let mut tt: Tt = HashMap::new();
+    let mut tt: Tt = opening_cache::load_or_empty(dir, &loaded.manifest);
     if opts.warm {
         if loaded.complete {
             print!("Warming opening transposition table (empty-board solve)... ");
