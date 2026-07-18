@@ -24,11 +24,12 @@ The headline claim — Nine Men's Morris is a **draw** with perfect play, matchi
 Gasser's original result — depends on one more step: an 18-ply alpha-beta search from
 the empty board over that database. That search needs access to the whole ~17 GB
 database, and on the 18 GB development machine there isn't enough RAM headroom to keep
-it cached, so it's been running for hours dominated by disk I/O rather than compute — a
-real resource constraint, not a correctness gap. See [`RESULTS.md`](RESULTS.md) for
-details and the confirmed root value once a run completes (on this machine or one with
-more RAM). This does not affect the mid/endgame result, which stands independently and
-is already complete.
+it cached; two attempts (several hours combined) made genuine but ever-slower progress
+dominated by disk I/O and were not carried to completion. This is a real resource
+constraint, not a correctness gap — see [`RESULTS.md`](RESULTS.md) for the full
+account and [`design-opening-phase.md`](design-opening-phase.md) for a follow-up plan
+that would help. The mid/endgame result above stands independently and is already
+complete regardless.
 
 ## How this differs from Gasser's approach
 

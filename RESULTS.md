@@ -94,7 +94,7 @@ terminal within that subspace (0 = immediate terminal).
 
 Reproduce with `./target/release/ninemm db-stats --dir db` after a full solve.
 
-## Opening (18-ply placement phase): in progress
+## Opening (18-ply placement phase): not independently reconfirmed on this machine
 
 The empty-board game-theoretic value — Nine Men's Morris' headline result, matching
 Gasser's published conclusion that the game is a **draw** with perfect play — is
@@ -102,26 +102,34 @@ computed by an alpha-beta search over the full database (`ninemm::opening`,
 `ninemm solve-opening`). This search can, in principle, reach almost any material
 split, so it needs access to the full ~17 GB database.
 
-**Known limitation on this development machine.** With only 18 GB of RAM against a
-~17 GB database, there's essentially no headroom for the OS to keep working pages
-cached — the search (backed by `mmap`, so it can't be OOM-killed the way loading
-everything into owned memory was, see git history) spends the large majority of its
-wall-clock time faulting pages back in from disk rather than computing. A run was left
-going for several hours and was still in progress (confirmed alive and still making
-genuine, if very slow, forward progress — CPU time kept climbing, just far slower than
-wall-clock time) when this section was last updated. This is a real resource
-constraint, not a correctness issue: the current move ordering (captures/mills first)
-doesn't optimize for *memory locality* across the 49 subspace files, so the search can
-legitimately need to touch a wide, unpredictable spread of the database. Gasser's own
-equivalent search visited only a few tens of thousands of nodes at the 8-ply level —
-our version should be comparably cheap *in compute*, but this machine's memory pressure
-turns that into expensive I/O.
+**Known limitation on this development machine, not pursued to completion.** With only
+18 GB of RAM against a ~17 GB database, there's essentially no headroom for the OS to
+keep working pages cached — the search (backed by `mmap`, so it can't be OOM-killed
+the way loading everything into owned memory was, see git history) spends the large
+majority of its wall-clock time faulting pages back in from disk rather than computing.
+Two separate runs were attempted, one left going for roughly five hours and a second,
+relaunched run for close to two hours; both remained genuinely alive and slowly
+progressing (CPU time kept climbing) rather than crashing or hanging outright, but
+CPU utilization *fell* over time (from roughly 80% early on to roughly 20-25% by the
+end of the second run) rather than holding steady — the opposite of what a
+soon-to-finish search should look like. Given no reliable way to estimate remaining
+time (alpha-beta exposes no progress percentage), the second run was deliberately
+stopped rather than left running indefinitely.
+
+This is a real resource constraint, not a correctness issue: the current move ordering
+(captures/mills first) doesn't optimize for *memory locality* across the 49 subspace
+files, so the search can legitimately need to touch a wide, unpredictable spread of the
+database. Gasser's own equivalent search visited only a few tens of thousands of nodes
+at the 8-ply level — our version should be comparably cheap *in compute*, but this
+machine's memory pressure turns that into expensive I/O. `design-opening-phase.md` in
+this repository is a self-contained plan for a persistent shallow-search cache that
+would substantially help *repeated* runs (though not a single cold run) — a reasonable
+follow-up for whoever next picks this up.
 
 **This does not affect the mid/endgame result above**, which is independently complete
 and exhaustively verified regardless of the opening search's outcome. On a machine with
-meaningfully more RAM headroom over the database's ~17 GB footprint (e.g. 32 GB+), or
-after adding cache-locality-aware move ordering to `opening.rs`, this search should
-complete quickly. Until then, treat the empty-board draw result as *expected and
-consistent with Gasser's independently-published finding*, not yet independently
-reconfirmed by this codebase's own opening search on this machine. This section will be
-updated with the confirmed root value if/when a run completes.
+meaningfully more RAM headroom over the database's ~17 GB footprint (e.g. 32 GB+), this
+search should complete in reasonable time as-is. Until re-attempted successfully, treat
+the empty-board draw result as *expected and consistent with Gasser's
+independently-published finding*, not yet independently reconfirmed by this codebase's
+own opening search.
