@@ -4,6 +4,17 @@
 it points to (`src/opening.rs`, `src/persist.rs`) and you should have everything needed
 to implement it without further context from whoever wrote this plan.
 
+> **Correction (2026-07-18, pre-implementation review)**: implement from
+> `implementation-opening-phase.md`, which supersedes this document where they
+> disagree. The review found that this plan's "you should not need to touch
+> `negamax`'s logic at all" is wrong: `negamax` is fail-soft alpha-beta, so TT entries
+> stored after a cutoff (or a fail-low) are *bounds*, not exact values — persisting
+> them as exact would bake wrong answers into the cache, and the same flaw already
+> lurks in the server's long-lived shared TT. The implementation guide therefore makes
+> the TT bound-aware first, encodes value+bound in the cache's value byte, adds a
+> payload checksum to the header, and reads the small cache file with plain
+> `fs::read` instead of mmap.
+
 ## Background
 
 Nine Men's Morris splits into two phases with different solving strategies (see
