@@ -146,4 +146,102 @@ soak-match suite on each checkpoint per `design-nn.md` §8's acceptance targets
 (state accuracy ≥99%, deployment-stack blunder rate ≤0.1%/move, 0 losses in 1000
 drawn-start soak games).
 
-## N8 (export + web runtime) — status: <!-- N8_STATUS -->
+### A demo-scale checkpoint (not the shipping model)
+
+To have something real to export, evaluate, and drive the web demo with, one config-M
+checkpoint was trained on the *full partial database* (all 15 subspaces, mixed) for
+40M samples (`ml/checkpoints/model_M_demo.pt`, ~17 min wall-clock on 4 CPU cores):
+final val accuracy **96.7%**, val cross-entropy 0.094. This is explicitly a
+demo/smoke-test artifact, not a stand-in for the real N7 grid — treat every number
+below as "the pipeline works and produces something reasonable," not as "here is the
+shipping model's strength."
+
+Move-quality metrics (`evaluate_move_quality`, 3000 sampled positions across all 15
+subspaces, seed 1):
+
+| Stack | Blunder rate | Optimal-move-class rate |
+|---|---|---|
+| Raw net (no TTA) | **0/3000 = 0.0%** | 95.07% |
+| +TTA (16-way symmetry averaging) | **0/3000 = 0.0%** | 95.17% |
+
+Zero blunders is a strong result, but it needs the caveat design-nn.md §8 itself
+gives: blunder rate only counts moves that cross a WDL *class* boundary
+(win→draw/loss, draw→loss); with only ~3.3% of sampled states even decided as
+non-draw in the training population's natural mix, most positions have a wide margin
+before a suboptimal move actually costs a class. The optimal-move-class rate (~95%)
+and the soak matches below are the more demanding signals.
+
+**Soak matches** (`run_soak`, model vs. exact database player, alternating who moves
+first, from drawn-or-better starts): at the raw 1-ply (`search_depth=0`) stack, TTA
+at root, 150 games, max 150 plies: **9/150 (6%) model losses from a non-lost start**
+(136 draws, 5 model wins). This is a real gap against design-nn.md §8's "0 losses in
+1000 drawn-start soak games" target -- and an honest one: zero single-move blunders
+on isolated positions does not imply zero losses over a full game, since small
+per-move imprecision compounds over dozens of plies in ways a position-level blunder
+metric doesn't capture. This is exactly why design-nn.md §8 lists soak matches as a
+*separate*, stronger gate rather than inferring end-to-end strength from blunder rate
+alone.
+
+**A real bug found here too**: `evaluate.py` initially had no search at all --
+`choose_move_by_model` is pure 1-ply, while `design-nn.md` §9's actual deployment
+stack (and `web/src/engine.ts`) is "TTA at root + shallow alpha-beta search." Added
+`choose_move_with_search` (a Python port of `engine.ts`'s negamax + tiered move
+selection) so the Python harness tests the same stack the browser ships. First
+attempt reused the same TTA-enabled evaluator for every search-interior node, not
+just the root -- both wrong (engine.ts deliberately restricts TTA to the root) and
+extremely slow (16x cost multiplied through an exponential search: one single move
+decision at depth 2 was still running after several minutes). Fixed by auto-deriving
+a non-TTA sibling evaluator for search interior nodes; a single depth-2 decision then
+takes well under a second. A full depth-2 (or depth-1) soak-match comparison at
+matching scale to the depth-0 baseline above was not completed in this session's
+remaining time budget -- CPU-only negamax search over a 15-subspace mixed position
+pool is slow enough (branching factor spikes on 3-stone jump-heavy positions) that
+150 games at depth 2 didn't finish in a reasonable wait. This is the concrete
+next-step experiment for whoever picks up N7: **does search close the 6% soak-loss
+gap, and by how much at depth 1 vs. depth 2?** The plumbing is in place
+(`run_soak(..., search_depth=N)`); it just needs a GPU or more CPU-hours than this
+session had left to answer at real scale.
+
+## N8 (export + web runtime) — status: done, gated
+
+`ml/nmm/export.py` writes ONNX (via `torch.onnx.export`, needed adding `onnxscript`
+as a dependency -- torch's default exporter requires it now), a raw little-endian
+weight blob + `model.json` manifest, and golden vectors, from any checkpoint; plus
+geometry and rules-trace fixtures (no trained model needed) for the web parity
+tests. All covered by `ml/tests/test_export*.py` (using a freshly-initialized,
+untrained checkpoint so these tests don't depend on the slow real training run).
+
+`web/src/` is an independent TypeScript re-implementation of `board.py`/
+`symmetry.py`/`movegen.py` (`board.ts`/`symmetry.ts`/`rules.ts`), a hand-rolled
+forward pass (`nn.ts`, no onnxruntime-web dependency), a search+TTA+move-selection
+engine (`engine.ts`), a non-model placement-phase heuristic (`placement.ts`,
+design-nn.md §10's explicit v1 scope boundary), and a minimal local-play + training-
+tool demo page (`public/index.html` + `demo.ts`).
+
+**Parity gates, run against the real exported `model_M_demo.pt`:**
+
+| Gate | Result |
+|---|---|
+| Geometry (adjacency/mills/16 symmetry perms) vs. Python | Exact match, 0 diffs |
+| Rules trace (10,000 real positions' legal-move sets) vs. Python | Exact match, 0 diffs |
+| `nn.ts` forward pass vs. PyTorch (64 golden vectors) | max abs logit diff **4.3×10⁻⁶**, max abs depth diff **7.9×10⁻⁸** (gate: ≤1×10⁻⁴) |
+| `engine.ts`'s `chooseMove` returns only legal moves (15 real positions, depth 0 and depth 1, real model) | 0 illegal moves |
+| Browser smoke test (Playwright + real Chromium, real demo page, real model over HTTP) | Loads, one full placement+engine-reply exchange, **zero console errors** |
+
+The `tsc --noEmit --noUnusedLocals --noUnusedParameters` strict build is clean.
+`web/scripts/browser_smoke_full.mjs` (an attempt at driving the *entire* 18-ply
+opening via simulated DOM clicks, to reach and exercise the movement-phase engine
+through the actual UI) proved flaky -- the capture-selection interaction (click a
+point, then if a mill closed, click again to pick which stone to capture) doesn't
+reduce cleanly to a "keep clicking things until the status text changes" heuristic.
+Rather than keep fighting DOM automation, `web/scripts/engine_smoke.mjs` exercises
+the same movement-phase code (`chooseMove`, real model, real positions) directly,
+which is both more reliable and a more direct test of the deployment-critical path;
+the browser smoke test's job narrowed to proving the page/model/rendering/one-
+exchange loop has no wiring bugs, which it does.
+
+**Not done**: the demo page was never opened by a human, and the training-tool WDL-
+bar rendering was only confirmed indirectly (state after the traced JS calls, not a
+visual screenshot check). `web/src/demo.ts`'s heuristic opening move and the capture-
+selection UI flow are exercised by `browser_smoke.mjs` for exactly one placement, not
+a full game.

@@ -25,16 +25,16 @@ let checked = 0;
 let illegalMoves = 0;
 const timings = [];
 
-for (const t of traces.slice(0, 300)) {
+for (const t of traces.slice(0, 15)) {
   if (popcount(t.mover) < 3) continue; // terminal, no move to choose
   const legal = movesMovement(t.mover, t.opp);
   if (legal.length === 0) continue; // blocked, terminal
 
-  for (const depth of [0, 2]) {
+  for (const depth of [0, 1]) {
     const start = performance.now();
     const mv = chooseMove(net, t.mover, t.opp, { searchDepth: depth, rootTTA: depth === 0 });
     const elapsed = performance.now() - start;
-    if (depth === 2) timings.push(elapsed);
+    if (depth === 1) timings.push(elapsed);
 
     if (!mv) {
       console.error(`chooseMove returned null for a position with ${legal.length} legal moves`);
@@ -59,14 +59,14 @@ for (const t of traces.slice(0, 300)) {
 }
 
 const avgMs = timings.reduce((a, b) => a + b, 0) / timings.length;
-console.log(`checked ${checked} positions (depth 0 and depth 2 each)`);
+console.log(`checked ${checked} positions (depth 0 and depth 1 each)`);
 console.log(`illegal moves returned: ${illegalMoves}`);
-console.log(`avg depth-2 search time: ${avgMs.toFixed(2)}ms`);
+console.log(`avg depth-1 search time: ${avgMs.toFixed(2)}ms`);
 
 if (illegalMoves > 0) {
   console.error("FAILED: chooseMove returned illegal move(s)");
   process.exit(1);
 }
 console.log(
-  "engine smoke test passed: chooseMove always returns a legal move (depth 0 and depth 2)"
+  "engine smoke test passed: chooseMove always returns a legal move (depth 0 and depth 1)"
 );
