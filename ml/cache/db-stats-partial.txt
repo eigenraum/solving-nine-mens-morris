@@ -1,0 +1,15 @@
+3-3: wins=140621 losses=28736 draws=269 max_win_depth=25 max_loss_depth=26
+3-4: wins=102281 losses=0 draws=658117 max_win_depth=33 max_loss_depth=0
+4-3: wins=75397 losses=3095 draws=681906 max_win_depth=1 max_loss_depth=32
+3-5: wins=6301 losses=9677 draws=2564412 max_win_depth=31 max_loss_depth=2
+5-3: wins=580660 losses=0 draws=1999730 max_win_depth=3 max_loss_depth=0
+4-4: wins=159 losses=29 draws=3225409 max_win_depth=9 max_loss_depth=8
+3-6: wins=0 losses=192000 draws=6683320 max_win_depth=0 max_loss_depth=6
+6-3: wins=2752371 losses=0 draws=4122949 max_win_depth=7 max_loss_depth=0
+4-5: wins=51 losses=1510 draws=10308935 max_win_depth=5 max_loss_depth=28
+5-4: wins=9889 losses=8 draws=10300599 max_win_depth=29 max_loss_depth=4
+3-7: wins=0 losses=6965784 draws=7759904 max_win_depth=0 max_loss_depth=30
+7-3: wins=13411581 losses=0 draws=1314107 max_win_depth=31 max_loss_depth=0
+4-6: wins=22 losses=1649972 draws=24115798 max_win_depth=3 max_loss_depth=156
+6-4: wins=5985293 losses=4 draws=19780495 max_win_depth=157 max_loss_depth=2
+5-5: wins=28819 losses=4289 draws=30881316 max_win_depth=57 max_loss_depth=56
