@@ -8,7 +8,7 @@
  * captured stone, if any) and its `opp` is the old mover's updated stones.
  */
 
-import { ADJ, FULL_MASK, POINT_MILLS, isMillAt, popcount } from "./board.js";
+import { ADJ, FULL_MASK, isMillAt, popcount } from "./board.js";
 
 export interface Move {
   src: number;
