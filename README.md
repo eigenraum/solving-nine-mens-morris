@@ -11,7 +11,9 @@ See [`design.md`](design.md) for the full architecture rationale and
 [`implementation.md`](implementation.md) for the milestone-by-milestone build plan this
 was implemented against. For details on *using* the generated database from another
 program, see [`readme-database.md`](readme-database.md). To get building and running
-yourself, see [`getting-started.md`](getting-started.md).
+yourself, see [`getting-started.md`](getting-started.md). For the ML side — training a
+small neural network as a lossy-compressed stand-in for the database and playing
+against it in the browser — see [`ml/README.md`](ml/README.md).
 
 ## Result
 
