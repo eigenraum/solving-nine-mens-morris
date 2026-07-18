@@ -103,6 +103,99 @@ def choose_move_by_model(evaluator: NetEvaluator, mover: int, opp: int) -> moveg
     return moves[best_i]
 
 
+def _negamax(search_eval: NetEvaluator, mover: int, opp: int, depth: int) -> float:
+    """Alpha-beta-free negamax (no pruning -- movement-phase branching factor
+    is small enough that plain search is fine at depth<=4) matching
+    web/src/engine.ts::negamax exactly: exact terminal rules at interior
+    nodes, network leaf evaluation (win_prob - loss_prob, roughly [-1,1])
+    otherwise. `search_eval` must be a *non-TTA* evaluator here -- engine.ts
+    deliberately uses plain `evaluate()` (not `evaluateTTA()`) inside search
+    nodes, reserving the 16x TTA cost for the root only (design-nn.md §5:
+    "TTA is a pure-runtime knob: on for root-move decisions ... off inside
+    search nodes where throughput matters"). Passing a TTA evaluator here
+    multiplies the already-exponential search cost by another 16x per node
+    for no accuracy benefit engine.ts's own design says to spend elsewhere.
+    """
+    term = movegen.terminal_class(mover, opp)
+    if term == LOSS:
+        return -1.0
+
+    if depth == 0:
+        probs, _ = search_eval.evaluate_batch(
+            np.array([mover], dtype=np.uint32), np.array([opp], dtype=np.uint32)
+        )
+        return float(probs[0, LABEL_WIN] - probs[0, LABEL_LOSS])
+
+    moves = movegen.moves_movement(mover, opp)
+    value = -float("inf")
+    for mv in moves:
+        if bin(mv.successor_mover).count("1") < 3:
+            child_value = 1.0
+        else:
+            child_value = -_negamax(search_eval, mv.successor_mover, mv.successor_opp, depth - 1)
+        value = max(value, child_value)
+    return value
+
+
+def choose_move_with_search(
+    root_eval: NetEvaluator,
+    mover: int,
+    opp: int,
+    search_depth: int,
+    search_eval: NetEvaluator | None = None,
+) -> movegen.Move | None:
+    """Root move selection with a `search_depth`-ply negamax refinement per
+    candidate move, matching web/src/engine.ts::chooseMove: the search value
+    only reclassifies the tier (opponent-loses / draw / opponent-wins), depth
+    tie-breaking still comes from a shallow read via `root_eval` (typically
+    TTA-enabled) -- search doesn't produce plies-to-mate on its own.
+    `search_eval` (typically non-TTA, for speed) drives the search itself;
+    defaults to `root_eval` if not given, but callers using TTA at the root
+    should always pass a separate non-TTA `search_eval` -- see `_negamax`.
+    `search_depth=0` falls back to plain `choose_move_by_model` semantics.
+    """
+    if search_depth <= 0:
+        return choose_move_by_model(root_eval, mover, opp)
+
+    moves = movegen.moves_movement(mover, opp)
+    if not moves:
+        return None
+
+    below3 = [mv for mv in moves if bin(mv.successor_mover).count("1") < 3]
+    if below3:
+        return below3[0]
+
+    if search_eval is not None:
+        search_evaluator = search_eval
+    elif root_eval.tta:
+        # Auto-derive a non-TTA sibling for the search itself -- see
+        # _negamax's docstring for why TTA inside search nodes is wasteful.
+        search_evaluator = NetEvaluator(root_eval.model, device=root_eval.device, tta=False)
+    else:
+        search_evaluator = root_eval
+    best_mv = None
+    best_key = None
+    for mv in moves:
+        shallow_probs, shallow_depths = root_eval.evaluate_batch(
+            np.array([mv.successor_mover], dtype=np.uint32),
+            np.array([mv.successor_opp], dtype=np.uint32),
+        )
+        shallow_depth = float(shallow_depths[0])
+        search_value = -_negamax(
+            search_evaluator, mv.successor_mover, mv.successor_opp, search_depth - 1
+        )
+        if search_value > 0.34:
+            tier, tiebreak = 0, shallow_depth
+        elif search_value < -0.34:
+            tier, tiebreak = 2, -shallow_depth
+        else:
+            tier, tiebreak = 1, 0.0
+        key = (tier, tiebreak)
+        if best_key is None or key < best_key:
+            best_key, best_mv = key, mv
+    return best_mv
+
+
 def choose_move_exact(db: Database, mover: int, opp: int) -> movegen.Move | None:
     """1-ply move selection using *exact* stored values (readme-database.md
     §5) -- the ground-truth player used as the opponent in soak matches and
@@ -171,11 +264,14 @@ def evaluate_move_quality(
     evaluator: NetEvaluator,
     n_samples: int,
     seed: int = 0,
+    search_depth: int = 0,
 ) -> MoveMetrics:
     """For sampled canonical, real, non-terminal positions: compare the
     model's chosen move against the database-optimal move. A "blunder" is a
     move whose true resulting class is strictly worse than the best
-    achievable class (win -> draw/loss, or draw -> loss).
+    achievable class (win -> draw/loss, or draw -> loss). `search_depth=0`
+    tests the raw (TTA-only) 1-ply move choice; >0 routes through
+    `choose_move_with_search` to test the full deployment stack.
     """
     rng = np.random.default_rng(seed)
     pairs = db.available_pairs
@@ -204,7 +300,7 @@ def evaluate_move_quality(
             if not moves:
                 continue  # terminal position, no move to evaluate
 
-            model_mv = choose_move_by_model(evaluator, m, o)
+            model_mv = choose_move_with_search(evaluator, m, o, search_depth)
             best_mv = choose_move_exact(db, m, o)
 
             true_cls_chosen = true_class_of_move(db, m, o, model_mv)
@@ -255,6 +351,7 @@ def play_soak_match(
     start_opp: int,
     model_plays_first: bool,
     max_plies: int = 400,
+    search_depth: int = 0,
 ) -> str:
     """Play one movement-phase game, model vs. exact database player, from a
     given start. Returns 'model_win' / 'model_loss' / 'draw' (draw = hit the
@@ -274,7 +371,7 @@ def play_soak_match(
             return "model_loss" if mover_is_model else "model_win"
 
         if model_to_move:
-            mv = choose_move_by_model(evaluator, mover, opp)
+            mv = choose_move_with_search(evaluator, mover, opp, search_depth)
         else:
             mv = choose_move_exact(db, mover, opp)
         mover, opp = mv.successor_mover, mv.successor_opp
@@ -288,6 +385,7 @@ def run_soak(
     n_games: int,
     seed: int = 0,
     max_plies: int = 400,
+    search_depth: int = 0,
 ) -> SoakResult:
     """Sample starting positions that are drawn-or-better for whichever side
     moves first (so a model loss is unambiguously attributable to play, not
@@ -327,7 +425,9 @@ def run_soak(
         if unfair_to_model:
             continue
 
-        outcome = play_soak_match(db, evaluator, mover, opp, model_first, max_plies)
+        outcome = play_soak_match(
+            db, evaluator, mover, opp, model_first, max_plies, search_depth
+        )
         result.games += 1
         if outcome == "model_loss":
             result.model_losses_from_nonlost_start += 1
