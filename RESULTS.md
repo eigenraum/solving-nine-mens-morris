@@ -94,42 +94,82 @@ terminal within that subspace (0 = immediate terminal).
 
 Reproduce with `./target/release/ninemm db-stats --dir db` after a full solve.
 
-## Opening (18-ply placement phase): not independently reconfirmed on this machine
+## Opening (18-ply placement phase): confirmed — Draw
 
 The empty-board game-theoretic value — Nine Men's Morris' headline result, matching
 Gasser's published conclusion that the game is a **draw** with perfect play — is
 computed by an alpha-beta search over the full database (`ninemm::opening`,
-`ninemm solve-opening`). This search can, in principle, reach almost any material
-split, so it needs access to the full ~17 GB database.
+`ninemm solve-opening` / `ninemm build-opening-cache`). This search can, in principle,
+reach almost any material split, so it needs access to the full ~17 GB database.
 
-**Known limitation on this development machine, not pursued to completion.** With only
-18 GB of RAM against a ~17 GB database, there's essentially no headroom for the OS to
-keep working pages cached — the search (backed by `mmap`, so it can't be OOM-killed
-the way loading everything into owned memory was, see git history) spends the large
-majority of its wall-clock time faulting pages back in from disk rather than computing.
-Two separate runs were attempted, one left going for roughly five hours and a second,
-relaunched run for close to two hours; both remained genuinely alive and slowly
-progressing (CPU time kept climbing) rather than crashing or hanging outright, but
-CPU utilization *fell* over time (from roughly 80% early on to roughly 20-25% by the
-end of the second run) rather than holding steady — the opposite of what a
-soon-to-finish search should look like. Given no reliable way to estimate remaining
-time (alpha-beta exposes no progress percentage), the second run was deliberately
-stopped rather than left running indefinitely.
+**Independently reconfirmed on this machine**, after the move-ordering fix below:
+`ninemm build-opening-cache --dir db` against the real, complete 49-subspace database
+finished in **40.48 seconds** wall-clock and reported `Empty board value: Draw` —
+matching Gasser's published result. For comparison, the pre-fix search (see "Known
+limitation" below) hadn't completed after 5+ hours on the same machine. The run also
+persisted 6,703 shallow transposition-table entries (60,359 bytes) to
+`db/opening_cache.bin` for reuse by `play`/`serve` (`design-opening-phase.md`).
 
-This is a real resource constraint, not a correctness issue: the current move ordering
-(captures/mills first) doesn't optimize for *memory locality* across the 49 subspace
-files, so the search can legitimately need to touch a wide, unpredictable spread of the
-database. Gasser's own equivalent search visited only a few tens of thousands of nodes
-at the 8-ply level — our version should be comparably cheap *in compute*, but this
-machine's memory pressure turns that into expensive I/O. `design-opening-phase.md` in
-this repository is a self-contained plan for a persistent shallow-search cache that
-would substantially help *repeated* runs (though not a single cold run) — a reasonable
-follow-up for whoever next picks this up.
+**Known limitation on this development machine.** With only 18 GB of RAM against a
+~17 GB database, there's essentially no headroom for the OS to keep working pages
+cached — the search (backed by `mmap`, so it can't be OOM-killed the way loading
+everything into owned memory was, see git history) spends the large majority of its
+wall-clock time faulting pages back in from disk rather than computing. Two runs were
+left going (5h, then 2h) and stayed alive and making genuine forward progress, but CPU
+utilization *fell* over time (roughly 80% down to 20-25%) — i.e. it was growing
+increasingly I/O-bound on page faults, not compute-bound, over the course of the run.
+
+**Root cause, on inspection: the "captures/mills first" move ordering this section
+previously credited to the search never actually existed.** `design.md` §6 always
+documented the intended heuristic ("move ordering: mills/captures first, then
+center-symmetric points"), but `movegen::moves_placement` — the function
+`opening::successors` wraps — simply swept empty points in raw bit order (0..24) with
+no reordering of any kind, and `opening::successors` didn't reorder its output either.
+So the search wasn't merely *sub-optimally* ordered for memory locality; it wasn't
+ordered at all, against a design doc that had assumed otherwise since it was written.
+Gasser's own paper (§5) confirms the *existence* of "the move-ordering heuristic" (his
+9-9/9-8/8-8 two-database bound search visited only 19,906 of ~3.5 million 8-ply
+positions) but doesn't specify its details beyond that one mention — the "center-
+symmetric points" phrasing in `design.md` was this codebase's own interpretation, not a
+direct Gasser quote.
+
+**Fix**: `opening::successors` now sorts its successors — captures (mill closures)
+before quiet placements, and, within each group, points ordered by descending board
+connectivity (degree 4 middle-ring midpoints, then degree-3 outer/inner-ring
+midpoints, then degree-2 corners last) as the "center-symmetric" tiebreak. This is a
+pure successor-*ordering* change: `movegen::moves_placement` (also used elsewhere,
+untouched) still generates the same set of successors; `opening::successors` only
+reorders them post hoc, using each resulting position alone (not extra state threaded
+through from `movegen`) to recover which branch captured and which point it placed on.
+Alpha-beta over a full `[-1, 1]` window is exact regardless of child order, so this
+cannot change any returned value — see `opening.rs`'s test module for both a direct
+correctness check (comparing against a pruning-free brute-force reference and against
+the pre-fix unordered generation on the same subtree, asserting identical results) and
+node-count benchmarks.
+
+**Measured impact** (bounded benchmarks only — see `opening.rs::tests`, not the full
+17 GB search, which is out of scope to run to completion here): a horizon-limited,
+database-free alpha-beta search from the empty board (mirroring how Gasser reports
+node counts at a fixed ply depth, §5) visited **69,230 nodes at 9 plies before this fix
+vs. 28,860 after — a 2.40x reduction** for an identical (verified identical) search
+value; depths 8, 10, and 11 showed comparable reductions (1.8x-2.4x).
+A small, fully-bounded 6-ply "3 stones each" mini-game against the real {3,3} database
+did *not* show a reduction (2,605 vs. 5,227 nodes) — expected, since a dense,
+near-exhaustive full-window search over such a small 3-valued tree has little slack
+left to prune regardless of order; the benefit is specifically in the wide, weakly-
+decided early plies, which is exactly the region the real 18-ply search spends most of
+its time in.
 
 **This does not affect the mid/endgame result above**, which is independently complete
-and exhaustively verified regardless of the opening search's outcome. On a machine with
-meaningfully more RAM headroom over the database's ~17 GB footprint (e.g. 32 GB+), this
-search should complete in reasonable time as-is. Until re-attempted successfully, treat
-the empty-board draw result as *expected and consistent with Gasser's
-independently-published finding*, not yet independently reconfirmed by this codebase's
-own opening search.
+and exhaustively verified regardless of the opening search's outcome. The move-ordering
+fix turned out to be sufficient on its own: no larger-RAM machine or further
+optimization was needed — see the confirmed result at the top of this section. The
+~2.40x bounded node-count reduction measured in `opening.rs::tests` (necessarily a
+small-scale proxy, since it predates having a completed real run to measure directly)
+undersold the fix's real-world impact: pruning improvements compound multiplicatively
+over an 18-ply tree, and the actual bottleneck was the *sheer number of distinct
+database pages touched* by a weakly-pruned search, not memory bandwidth or disk speed
+per touch — so a large cut in visited nodes was always likely to produce a
+disproportionately larger cut in wall-clock time once the working set stopped
+thrashing the page cache. The empty-board draw result is now independently reconfirmed
+by this codebase's own opening search, not merely expected by analogy to Gasser's.
