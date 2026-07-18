@@ -43,6 +43,13 @@ pub struct ServeOptions {
     /// Serve `index.html` from this directory instead of the copy
     /// embedded at compile time (edit-reload development loop).
     pub ui_dir: Option<PathBuf>,
+    /// Directory holding the built web runtime (`dist/` with the compiled
+    /// TS modules, `export/` with the model files). When present, the UI
+    /// offers the in-browser neural engine alongside the exact database:
+    /// `/nn/*` maps to `<web_dir>/dist/*` and `/export/*` to
+    /// `<web_dir>/export/*`. Missing files are plain 404s — the UI probes
+    /// and hides the neural option, so a database-only setup is unchanged.
+    pub web_dir: PathBuf,
 }
 
 pub struct Loaded {
@@ -115,6 +122,21 @@ pub fn serve(dir: &Path, opts: &ServeOptions) -> Result<()> {
         }
     }
 
+    if opts.web_dir.join("dist").join("provider.js").exists()
+        && opts.web_dir.join("export").join("model.json").exists()
+    {
+        println!(
+            "Neural engine assets found in {} -- the UI will offer the in-browser network engine.",
+            opts.web_dir.display()
+        );
+    } else {
+        println!(
+            "No neural engine assets in {} (need dist/provider.js and export/model.json; see \
+             implementation-nn.md N8) -- the UI will offer the exact database only.",
+            opts.web_dir.display()
+        );
+    }
+
     let server = tiny_http::Server::http(&opts.bind)
         .map_err(|e| anyhow::anyhow!("failed to bind {}: {e}", opts.bind))?;
     println!("Serving on http://{}", opts.bind);
@@ -149,6 +171,33 @@ fn error_response(status: u16, message: String) -> tiny_http::Response<Cursor<Ve
     json_response(status, serde_json::json!({ "error": message }).to_string())
 }
 
+/// Serve one file from `dir/rest` for the neural-engine assets (`/nn/*` ->
+/// `<web_dir>/dist/*`, `/export/*` -> `<web_dir>/export/*`). `rest` comes
+/// straight off the URL, so only allow plain file names: a single path
+/// segment, no traversal.
+fn static_response(dir: &Path, rest: &str) -> tiny_http::Response<Cursor<Vec<u8>>> {
+    if rest.is_empty()
+        || rest.contains('/')
+        || rest.contains('\\')
+        || rest.starts_with('.')
+        || rest.contains("..")
+    {
+        return error_response(404, "not found".to_string());
+    }
+    let path = dir.join(rest);
+    let Ok(data) = std::fs::read(&path) else {
+        return error_response(404, "not found".to_string());
+    };
+    let mime = match path.extension().and_then(|e| e.to_str()) {
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("json") | Some("map") => "application/json; charset=utf-8",
+        _ => "application/octet-stream",
+    };
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_bytes())
+        .expect("static header is valid");
+    tiny_http::Response::from_data(data).with_header(header)
+}
+
 fn route(
     req: &mut tiny_http::Request,
     loaded: &Loaded,
@@ -167,6 +216,14 @@ fn route(
             None => INDEX_HTML.to_string(),
         };
         return html_response(200, html);
+    }
+    if is_get {
+        if let Some(rest) = url.strip_prefix("/nn/") {
+            return static_response(&opts.web_dir.join("dist"), rest);
+        }
+        if let Some(rest) = url.strip_prefix("/export/") {
+            return static_response(&opts.web_dir.join("export"), rest);
+        }
     }
     if is_get && url == "/api/meta" {
         let body = serde_json::json!({

@@ -1,3 +1,9 @@
+/**
+ * Full-opening smoke test of the unified UI: enables the evaluation panel and
+ * drives the whole placement phase through the move list (which applies
+ * captures atomically), then plays one movement-phase move and checks the
+ * panel. Works against scripts/serve.mjs (neural engine) or `ninemm serve`.
+ */
 import { chromium } from "playwright";
 
 const port = process.argv[2] ?? 8834;
@@ -9,84 +15,66 @@ const page = await browser.newPage();
 
 const consoleErrors = [];
 page.on("console", (msg) => {
-  if (msg.type() === "error") consoleErrors.push(msg.text());
+  if (msg.type() === "error" && !msg.text().includes("Failed to load resource")) {
+    consoleErrors.push(msg.text());
+  }
 });
 page.on("pageerror", (err) => consoleErrors.push(String(err)));
 
-await page.goto(`http://localhost:${port}/public/index.html`);
+await page.goto(`http://localhost:${port}/`);
 await page.waitForFunction(
-  () => document.getElementById("status")?.textContent?.includes("to place"),
-  { timeout: 10000 }
+  () => document.getElementById("status")?.textContent?.includes("Placement phase"),
+  { timeout: 15000 }
 );
 
+await page.locator("#evalCheckbox").check();
+await page.waitForTimeout(300);
+
 async function currentState() {
-  const status = await page.textContent("#status");
-  const stones = await page.locator("svg circle.stone-w, svg circle.stone-b").count();
-  return { status: status ?? "", stones };
+  const status = (await page.textContent("#status")) ?? "";
+  const stones = await page.locator("svg circle.stone").count();
+  return { status, stones };
 }
 
-// Drive the whole opening: click empty points for human placements; if a
-// mill closes (status shows "Mill!"), try each stone circle in turn until
-// one resolves the capture (only the legal capture targets do anything).
+// Drive the opening: whenever it's the human's (White's) turn, apply the
+// first move-list entry; the engine answers on its own.
 let guard = 0;
-while (guard++ < 80) {
-  const { status, stones } = await currentState();
-  if (status.includes("to move")) break; // reached movement phase
-  if (stones >= 18 && !status.includes("Mill")) break;
-
-  if (status.includes("Mill!")) {
-    const stoneEls = await page.locator("svg circle.stone-w, svg circle.stone-b").all();
-    for (const el of stoneEls) {
-      const before = await page.textContent("#status");
-      await el.click();
-      await page.waitForTimeout(50);
-      const after = await page.textContent("#status");
-      if (after !== before) break;
-    }
-  } else {
-    const points = await page.locator("svg circle.point").all();
-    for (const pt of points) {
-      const before = await page.textContent("#status");
-      await pt.click();
-      await page.waitForTimeout(50);
-      const after = await page.textContent("#status");
-      if (after !== before) break;
-    }
+while (guard++ < 60) {
+  const { status } = await currentState();
+  if (!status.includes("Placement phase")) break;
+  if (status.includes("White to move")) {
+    const rows = page.locator("#moveList li");
+    if ((await rows.count()) > 0) await rows.first().click();
   }
-  await page.waitForTimeout(300); // let the engine respond
+  await page.waitForTimeout(700); // engine reply + re-analysis
 }
 
 const final = await currentState();
 console.log("status after opening:", final.status);
 console.log("stones on board after opening:", final.stones);
 
-const evalText = await page.textContent("#evalList");
-console.log("eval panel text (first 300 chars):", evalText?.slice(0, 300));
-
-const reachedMovementPhase = final.status.includes("to move");
+const reachedMovementPhase = final.status.includes("Movement phase");
 console.log("reached movement phase:", reachedMovementPhase);
 
-// If it's the human's turn in movement phase, click one of our stones then
-// one of its legal destinations, to exercise the trained-model move path
-// and the eval panel's TTA-backed WDL bars.
-if (reachedMovementPhase && final.status.startsWith("White")) {
-  const before = await page.textContent("#evalList");
-  const stoneEls = await page.locator("svg circle.stone-w").all();
-  outer: for (const stoneEl of stoneEls) {
-    await stoneEl.click();
-    await page.waitForTimeout(50);
-    const points = await page.locator("svg circle.point").all();
-    for (const pt of points) {
-      const beforeStatus = await page.textContent("#status");
-      await pt.click();
-      await page.waitForTimeout(50);
-      const afterStatus = await page.textContent("#status");
-      if (afterStatus !== beforeStatus) break outer;
-    }
+let playedMovementMove = false;
+let sawEvalRows = false;
+if (reachedMovementPhase) {
+  // Wait for White's turn, then play the top-ranked move from the list.
+  for (let i = 0; i < 20; i++) {
+    const status = (await page.textContent("#status")) ?? "";
+    if (status.includes("White to move")) break;
+    await page.waitForTimeout(500);
   }
-  await page.waitForTimeout(500);
-  const afterMoveStatus = await page.textContent("#status");
-  console.log("status after one movement-phase move:", afterMoveStatus);
+  sawEvalRows = (await page.locator("#moveList li").count()) > 0;
+  const before = (await page.textContent("#status")) ?? "";
+  const rows = page.locator("#moveList li");
+  if ((await rows.count()) > 0) {
+    await rows.first().click();
+    await page.waitForTimeout(1500);
+    const after = (await page.textContent("#status")) ?? "";
+    playedMovementMove = after !== before || (await page.locator("svg circle.stone").count()) !== final.stones;
+    console.log("status after one movement-phase move:", after);
+  }
 }
 
 await browser.close();
@@ -95,12 +83,20 @@ if (consoleErrors.length > 0) {
   console.error("CONSOLE ERRORS:", consoleErrors);
   process.exit(1);
 }
-if (final.stones !== 18) {
-  console.error(`expected 18 stones after full opening, got ${final.stones}`);
+if (final.stones < 12 || final.stones > 18) {
+  console.error(`implausible stone count after the opening: ${final.stones}`);
   process.exit(1);
 }
 if (!reachedMovementPhase) {
   console.error("did not reach movement phase after the opening");
+  process.exit(1);
+}
+if (!sawEvalRows) {
+  console.error("evaluation panel showed no move rows in movement phase");
+  process.exit(1);
+}
+if (!playedMovementMove) {
+  console.error("clicking a move-list row did not apply a movement-phase move");
   process.exit(1);
 }
 console.log("full smoke test passed");

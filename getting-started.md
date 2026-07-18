@@ -99,7 +99,16 @@ mid-game).
 
 A browser-based alternative to `play`, with an optional evaluation overlay (see
 [`ui-design.md`](ui-design.md) for the full design and [`ui-implementation.md`](ui-implementation.md)
-for the build plan):
+for the build plan). There is **one** UI (`ui/index.html`) with two selectable
+engine backends behind the same analysis contract:
+
+- **Exact database** — perfect play and exact win/draw/loss values, served by
+  `ninemm serve` over the solved database.
+- **Neural net (in browser)** — the compressed value network from `design-nn.md`,
+  running entirely client-side (no database, ~1 MB of weights); evaluations are
+  WDL probability bars, and the opening is a heuristic (design-nn.md §10).
+
+The page probes which backends are reachable and offers what it finds.
 
 ```sh
 ./target/release/ninemm serve --dir db --warm
@@ -110,6 +119,17 @@ destination to place; a mill closure with more than one legal capture prompts yo
 pick a capturable stone on the board. Tick **Show evaluation** to see the value of the
 current position and of every legal move (win/draw/loss, with ply counts in the
 movement phase), color-coded on the board and listed in the move panel.
+
+To also offer the neural engine, build the web runtime and export a model first
+(see `implementation-nn.md` N8): `npm run build` in `web/`, plus a model export in
+`web/export/`. `ninemm serve` picks both up via `--web-dir` (default `web`, so
+serving from the repository root just works).
+
+To run the UI with **no database and no Rust server at all** (neural engine only):
+
+```sh
+cd web && npm run build && node scripts/serve.mjs   # http://localhost:8834
+```
 
 - Like `play`, placement-phase (opening) analysis needs the **complete** 49-subspace
   database; movement-phase analysis works with whatever subspaces are present.

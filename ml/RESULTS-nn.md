@@ -247,3 +247,25 @@ bar rendering was only confirmed indirectly (state after the traced JS calls, no
 visual screenshot check). `web/src/demo.ts`'s heuristic opening move and the capture-
 selection UI flow are exercised by `browser_smoke.mjs` for exactly one placement, not
 a full game.
+
+## UI unification — status: done
+
+The stand-alone demo page (`web/public/index.html` + `web/src/demo.ts`) is gone:
+the repository now has a single frontend, `ui/index.html` (the exact-database UI
+from `ui-design.md`), which drives either backend through one analysis contract.
+`web/src/provider.ts` wraps the TS engine (`rules.ts`/`placement.ts`/`engine.ts`)
+in the exact `AnalyzeResponse` shape `src/server.rs` serves — same wire format,
+same perspective-conversion discipline, plus an optional `wdl` probability triple
+per value that the UI renders as the training-tool bars. `ninemm serve --web-dir`
+serves the compiled `web/dist` at `/nn/*` and the model export at `/export/*`;
+`web/scripts/serve.mjs` serves the same page neural-only. The demo page's features
+(WDL bars, offline play, heuristic opening) all survive in the unified UI, which
+also brings undo, two-player mode, position setup, threefold-repetition detection,
+and engine switching mid-game to the neural engine.
+
+`browser_smoke_full.mjs`'s old flakiness (driving captures by blind clicking) is
+resolved by driving the opening through the move-list panel, which applies a
+complete move — capture included — in one click; the full 18-ply opening plus one
+movement-phase move now runs green under Playwright, as does a dual-backend smoke
+against `ninemm serve --allow-partial` (engine switching, exact values vs. bars on
+the same 3v3 position).
