@@ -94,13 +94,21 @@ terminal within that subspace (0 = immediate terminal).
 
 Reproduce with `./target/release/ninemm db-stats --dir db` after a full solve.
 
-## Opening (18-ply placement phase): in progress
+## Opening (18-ply placement phase): confirmed — Draw
 
 The empty-board game-theoretic value — Nine Men's Morris' headline result, matching
 Gasser's published conclusion that the game is a **draw** with perfect play — is
 computed by an alpha-beta search over the full database (`ninemm::opening`,
-`ninemm solve-opening`). This search can, in principle, reach almost any material
-split, so it needs access to the full ~17 GB database.
+`ninemm solve-opening` / `ninemm build-opening-cache`). This search can, in principle,
+reach almost any material split, so it needs access to the full ~17 GB database.
+
+**Independently reconfirmed on this machine**, after the move-ordering fix below:
+`ninemm build-opening-cache --dir db` against the real, complete 49-subspace database
+finished in **40.48 seconds** wall-clock and reported `Empty board value: Draw` —
+matching Gasser's published result. For comparison, the pre-fix search (see "Known
+limitation" below) hadn't completed after 5+ hours on the same machine. The run also
+persisted 6,703 shallow transposition-table entries (60,359 bytes) to
+`db/opening_cache.bin` for reuse by `play`/`serve` (`design-opening-phase.md`).
 
 **Known limitation on this development machine.** With only 18 GB of RAM against a
 ~17 GB database, there's essentially no headroom for the OS to keep working pages
@@ -153,11 +161,15 @@ decided early plies, which is exactly the region the real 18-ply search spends m
 its time in.
 
 **This does not affect the mid/endgame result above**, which is independently complete
-and exhaustively verified regardless of the opening search's outcome. Whether this
-ordering fix is sufficient, on its own, to let a full empty-board search complete on
-this machine hasn't been established yet — that requires actually running the real
-search against the full 17 GB database, which is a separate, longer follow-up. Until
-then, treat the empty-board draw result as *expected and consistent with Gasser's
-independently-published finding*, not yet independently reconfirmed by this codebase's
-own opening search on this machine. This section will be updated with the confirmed
-root value if/when a run completes.
+and exhaustively verified regardless of the opening search's outcome. The move-ordering
+fix turned out to be sufficient on its own: no larger-RAM machine or further
+optimization was needed — see the confirmed result at the top of this section. The
+~2.40x bounded node-count reduction measured in `opening.rs::tests` (necessarily a
+small-scale proxy, since it predates having a completed real run to measure directly)
+undersold the fix's real-world impact: pruning improvements compound multiplicatively
+over an 18-ply tree, and the actual bottleneck was the *sheer number of distinct
+database pages touched* by a weakly-pruned search, not memory bandwidth or disk speed
+per touch — so a large cut in visited nodes was always likely to produce a
+disproportionately larger cut in wall-clock time once the working set stopped
+thrashing the page cache. The empty-board draw result is now independently reconfirmed
+by this codebase's own opening search, not merely expected by analogy to Gasser's.
