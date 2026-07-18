@@ -74,6 +74,10 @@ def train(
     only_pairs: list[tuple[int, int]] | None = None,
     logdir: str | None = None,
 ) -> NmmNet:
+    if out_path:
+        # Fail on an unwritable --out now, not at save time after the full run.
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
     writer = None
     if logdir:
         from torch.utils.tensorboard.writer import SummaryWriter
