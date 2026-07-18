@@ -51,6 +51,29 @@ enum Commands {
         #[arg(long, default_value = "white")]
         human: String,
     },
+    /// Serve the browser UI and JSON analysis API over the solved
+    /// database (see ui-design.md).
+    Serve {
+        #[arg(long, default_value = "db")]
+        dir: PathBuf,
+        /// Address to bind. This is a local analysis tool -- keep it on
+        /// localhost unless you understand the exposure.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        /// Load whatever subspaces exist instead of requiring all 49.
+        /// Placement-phase analysis is refused; movement-phase analysis
+        /// works for material pairs that are present. Development aid.
+        #[arg(long)]
+        allow_partial: bool,
+        /// Run the empty-board opening solve at startup to warm the
+        /// transposition table (first placement analysis becomes instant).
+        #[arg(long)]
+        warm: bool,
+        /// Serve ui/index.html from this directory instead of the copy
+        /// embedded at compile time (edit-reload development loop).
+        #[arg(long)]
+        ui_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -76,13 +99,17 @@ fn main() -> anyhow::Result<()> {
             for sub in index::all_subspaces() {
                 let sz = index::subspace_size(sub);
                 total += sz;
-                if sub.w >= 8 || (sub.w, sub.b) == (SubspaceId::new(3, 3).w, SubspaceId::new(3, 3).b)
+                if sub.w >= 8
+                    || (sub.w, sub.b) == (SubspaceId::new(3, 3).w, SubspaceId::new(3, 3).b)
                 {
                     println!("subspace {}-{}: {sz}", sub.w, sub.b);
                 }
             }
             println!("total slots across all 49 subspaces: {total}");
-            println!("solve order (28 unordered pairs): {:?}", index::solve_order());
+            println!(
+                "solve order (28 unordered pairs): {:?}",
+                index::solve_order()
+            );
         }
         Commands::Solve { dir, max_total } => {
             ninemm::orchestrate::solve_all(&dir, max_total)?;
@@ -103,7 +130,10 @@ fn main() -> anyhow::Result<()> {
                         r.checked
                     );
                     for m in &r.mismatches {
-                        println!("    idx={} stored={} expected={}", m.idx, m.stored, m.expected);
+                        println!(
+                            "    idx={} stored={} expected={}",
+                            m.idx, m.stored, m.expected
+                        );
                     }
                 }
             }
@@ -114,13 +144,35 @@ fn main() -> anyhow::Result<()> {
         Commands::Play { dir, human } => {
             run_play(&dir, &human)?;
         }
+        Commands::Serve {
+            dir,
+            bind,
+            allow_partial,
+            warm,
+            ui_dir,
+        } => {
+            ninemm::server::serve(
+                &dir,
+                &ninemm::server::ServeOptions {
+                    bind,
+                    allow_partial,
+                    warm,
+                    ui_dir,
+                },
+            )?;
+        }
         Commands::DbStats { dir } => {
             use ninemm::index::SubspaceId;
             use ninemm::persist::{self, Manifest};
             let manifest = Manifest::load(&dir)?;
             for entry in &manifest.entries {
                 let sub = SubspaceId::new(entry.w as usize, entry.b as usize);
-                let data = persist::read_subspace_verified(&dir, &manifest, entry.w as usize, entry.b as usize)?;
+                let data = persist::read_subspace_verified(
+                    &dir,
+                    &manifest,
+                    entry.w as usize,
+                    entry.b as usize,
+                )?;
                 let t = ninemm::verify::tally(sub, &data);
                 println!(
                     "{}-{}: wins={} losses={} draws={} max_win_depth={} max_loss_depth={}",
@@ -154,13 +206,22 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
     println!("Loading database from {}...", dir.display());
     let manifest = Manifest::load(dir)?;
     if manifest.entries.is_empty() {
-        anyhow::bail!("no solved database found in {} -- run `ninemm solve` first", dir.display());
+        anyhow::bail!(
+            "no solved database found in {} -- run `ninemm solve` first",
+            dir.display()
+        );
     }
-    let expected: Vec<(usize, usize)> = (3..=9).flat_map(|w| (3..=9).map(move |b| (w, b))).collect();
+    let expected: Vec<(usize, usize)> =
+        (3..=9).flat_map(|w| (3..=9).map(move |b| (w, b))).collect();
     let missing: Vec<(usize, usize)> = expected
         .iter()
         .copied()
-        .filter(|&(w, b)| !manifest.entries.iter().any(|e| e.w as usize == w && e.b as usize == b))
+        .filter(|&(w, b)| {
+            !manifest
+                .entries
+                .iter()
+                .any(|e| e.w as usize == w && e.b as usize == b)
+        })
         .collect();
     if !missing.is_empty() {
         anyhow::bail!(
@@ -178,7 +239,11 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
         let data = persist::read_subspace_verified(dir, &manifest, e.w as usize, e.b as usize)?;
         db.insert(e.w as usize, e.b as usize, data);
     }
-    println!("Loaded {} subspaces. You are {}.", manifest.entries.len(), if human_is_white { "White" } else { "Black" });
+    println!(
+        "Loaded {} subspaces. You are {}.",
+        manifest.entries.len(),
+        if human_is_white { "White" } else { "Black" }
+    );
 
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
@@ -189,21 +254,22 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
     let mut white_to_move = true;
 
     // Ask a numbered question, reading a 1-based index from stdin.
-    let ask_choice = |lines: &mut dyn Iterator<Item = io::Result<String>>, n: usize| -> anyhow::Result<usize> {
-        loop {
-            print!("Choice (1-{n}): ");
-            io::stdout().flush()?;
-            let Some(line) = lines.next() else {
-                anyhow::bail!("input closed");
-            };
-            if let Ok(i) = line?.trim().parse::<usize>() {
-                if (1..=n).contains(&i) {
-                    return Ok(i - 1);
+    let ask_choice =
+        |lines: &mut dyn Iterator<Item = io::Result<String>>, n: usize| -> anyhow::Result<usize> {
+            loop {
+                print!("Choice (1-{n}): ");
+                io::stdout().flush()?;
+                let Some(line) = lines.next() else {
+                    anyhow::bail!("input closed");
+                };
+                if let Ok(i) = line?.trim().parse::<usize>() {
+                    if (1..=n).contains(&i) {
+                        return Ok(i - 1);
+                    }
                 }
+                println!("Enter a number between 1 and {n}.");
             }
-            println!("Enter a number between 1 and {n}.");
-        }
-    };
+        };
 
     loop {
         let real_pos = if let Some(ps) = &placement {
@@ -224,7 +290,11 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
         println!();
         println!("{}", play::render(real_pos));
         if let Some(ps) = &placement {
-            let (wh, bh) = if white_to_move { (ps.mover_hand, ps.opp_hand) } else { (ps.opp_hand, ps.mover_hand) };
+            let (wh, bh) = if white_to_move {
+                (ps.mover_hand, ps.opp_hand)
+            } else {
+                (ps.opp_hand, ps.mover_hand)
+            };
             println!("(in hand: White={wh} Black={bh})");
         }
         let mover_label = if white_to_move { "White" } else { "Black" };
@@ -243,14 +313,18 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
                 loop {
                     print!("Enter placement (e.g. 'a1'): ");
                     io::stdout().flush()?;
-                    let Some(line) = lines.next() else { return Ok(()) };
+                    let Some(line) = lines.next() else {
+                        return Ok(());
+                    };
                     let line = line?;
                     let Some(p) = board::parse_point(line.trim()) else {
                         println!("Could not parse '{line}'.");
                         continue;
                     };
-                    let matches: Vec<_> =
-                        succs.iter().filter(|s| (s.pos.black() & !ps.pos.white()) & (1 << p) != 0).collect();
+                    let matches: Vec<_> = succs
+                        .iter()
+                        .filter(|s| (s.pos.black() & !ps.pos.white()) & (1 << p) != 0)
+                        .collect();
                     if matches.is_empty() {
                         println!("Illegal placement at {line}.");
                         continue;
@@ -267,7 +341,8 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
                     break *matches[idx];
                 }
             } else {
-                let choice = play::best_placement_move(&ps, &db, &mut tt).expect("succs is nonempty");
+                let choice =
+                    play::best_placement_move(&ps, &db, &mut tt).expect("succs is nonempty");
                 println!("Engine plays.");
                 choice
             };
@@ -297,14 +372,17 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
             loop {
                 print!("Enter move ('from to', e.g. 'a1 a4'): ");
                 io::stdout().flush()?;
-                let Some(line) = lines.next() else { return Ok(()) };
+                let Some(line) = lines.next() else {
+                    return Ok(());
+                };
                 let line = line?;
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 let (Some(from_s), Some(to_s)) = (parts.first(), parts.get(1)) else {
                     println!("Enter two squares separated by a space.");
                     continue;
                 };
-                let (Some(from), Some(to)) = (board::parse_point(from_s), board::parse_point(to_s)) else {
+                let (Some(from), Some(to)) = (board::parse_point(from_s), board::parse_point(to_s))
+                else {
                     println!("Could not parse squares.");
                     continue;
                 };
@@ -318,7 +396,8 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
                     .filter(|s| {
                         let new_mover = s.black();
                         let old_mover_minus_from = pos.white() & !(1 << from);
-                        new_mover & !old_mover_minus_from & (1 << to) != 0 && new_mover & (1 << from) == 0
+                        new_mover & !old_mover_minus_from & (1 << to) != 0
+                            && new_mover & (1 << from) == 0
                     })
                     .collect();
                 if matches.is_empty() {
@@ -337,7 +416,10 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
                 break *matches[idx];
             }
         } else {
-            println!("Engine plays (value: {}).", describe_value(choice.value_code));
+            println!(
+                "Engine plays (value: {}).",
+                describe_value(choice.value_code)
+            );
             choice.successor
         };
 
@@ -345,8 +427,18 @@ fn run_play(dir: &std::path::Path, human: &str) -> anyhow::Result<()> {
         movement = Some(next);
         if next.white_count() < 3 {
             println!();
-            println!("{}", play::render(if white_to_move { next } else { next.swap_colors() }));
-            println!("{} loses (fewer than three stones).", if white_to_move { "White" } else { "Black" });
+            println!(
+                "{}",
+                play::render(if white_to_move {
+                    next
+                } else {
+                    next.swap_colors()
+                })
+            );
+            println!(
+                "{} loses (fewer than three stones).",
+                if white_to_move { "White" } else { "Black" }
+            );
             break;
         }
     }

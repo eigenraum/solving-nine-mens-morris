@@ -1,0 +1,683 @@
+<title>Nine Men's Morris</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --line: #333;
+    --panel-bg: #f4f4f4;
+    --panel-border: #ccc;
+    --white-fill: #f2f2f2;
+    --black-fill: #262626;
+    --stone-stroke: #111;
+    --accent: #1565c0;
+    --win: #2e7d32;
+    --draw: #9e9e9e;
+    --loss: #c62828;
+    --danger-bg: #fff3cd;
+    --danger-fg: #7a5b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1b1b1b;
+      --fg: #eaeaea;
+      --line: #bbb;
+      --panel-bg: #262626;
+      --panel-border: #444;
+      --white-fill: #e8e8e8;
+      --black-fill: #111;
+      --stone-stroke: #000;
+      --accent: #64b5f6;
+      --win: #66bb6a;
+      --draw: #bdbdbd;
+      --loss: #ef5350;
+      --danger-bg: #4a3b00;
+      --danger-fg: #ffd54f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  h1 { font-size: 1.1rem; margin: 0 0 0.5rem 0; }
+  .layout {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.5rem;
+    padding: 1rem;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  .board-col { flex: 0 0 480px; max-width: 100%; }
+  .panel-col { flex: 1 1 320px; min-width: 280px; }
+  #board { width: 100%; max-width: 480px; height: auto; display: block; }
+  .banner {
+    font-size: 1rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    margin-bottom: 0.75rem;
+  }
+  .banner.win { color: var(--win); }
+  .banner.loss { color: var(--loss); }
+  .banner.draw { color: var(--draw); }
+  .banner.over { font-weight: 600; }
+  .warn {
+    background: var(--danger-bg);
+    color: var(--danger-fg);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+  }
+  fieldset {
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    margin: 0 0 0.75rem 0;
+  }
+  legend { padding: 0 0.4rem; font-size: 0.85rem; opacity: 0.8; }
+  .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.5rem; }
+  button {
+    font: inherit;
+    padding: 0.35rem 0.75rem;
+    border-radius: 6px;
+    border: 1px solid var(--panel-border);
+    background: var(--panel-bg);
+    color: var(--fg);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  label { font-size: 0.9rem; cursor: pointer; }
+  textarea {
+    width: 100%;
+    font-family: ui-monospace, monospace;
+    font-size: 0.8rem;
+    min-height: 6rem;
+  }
+  #moveList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+  }
+  #moveList li {
+    padding: 0.3rem 0.6rem;
+    border-bottom: 1px solid var(--panel-border);
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+  #moveList li:last-child { border-bottom: none; }
+  #moveList li:hover { background: var(--panel-bg); }
+  #moveList li.engine { font-weight: 700; }
+  #moveList .val { font-variant-numeric: tabular-nums; }
+  .val.win { color: var(--win); }
+  .val.draw { color: var(--draw); }
+  .val.loss { color: var(--loss); }
+  #status { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  #handRow { display: flex; justify-content: space-between; margin-top: 0.4rem; font-size: 0.85rem; }
+  .hand-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 2px; border: 1px solid var(--stone-stroke); vertical-align: middle; }
+  .hand-dot.white { background: var(--white-fill); }
+  .hand-dot.black { background: var(--black-fill); }
+  #busyOverlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.15);
+    font-size: 0.9rem;
+    border-radius: 6px;
+  }
+  .board-wrap { position: relative; }
+</style>
+
+<div class="layout">
+  <div class="board-col">
+    <h1>Nine Men's Morris</h1>
+    <div id="status"></div>
+    <div id="warn" class="warn" style="display:none;"></div>
+    <div class="board-wrap">
+      <svg id="board" viewBox="0 0 500 500" width="500" height="500" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div id="busyOverlay">thinking&hellip;</div>
+    </div>
+    <div id="handRow"></div>
+  </div>
+
+  <div class="panel-col">
+    <fieldset>
+      <legend>Game</legend>
+      <div class="row">
+        <label><input type="radio" name="mode" value="white" checked> Play White</label>
+        <label><input type="radio" name="mode" value="black"> Play Black</label>
+        <label><input type="radio" name="mode" value="both"> Two players</label>
+      </div>
+      <div class="row">
+        <button id="newGameBtn">New game</button>
+        <button id="undoBtn">Undo</button>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="evalCheckbox"> Show evaluation</label>
+      </div>
+    </fieldset>
+
+    <fieldset id="evalPanel" style="display:none;">
+      <legend>Moves</legend>
+      <ul id="moveList"></ul>
+    </fieldset>
+
+    <details>
+      <summary>Set up position</summary>
+      <textarea id="setupText"></textarea>
+      <div class="row"><button id="loadBtn">Load</button></div>
+    </details>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// --- Board geometry (readme-database.md §1; point p = ring*8+i) --------
+const COORD = [
+  [1,7],[4,7],[7,7],[7,4],[7,1],[4,1],[1,1],[1,4],   // outer ring, p=0..7
+  [2,6],[4,6],[6,6],[6,4],[6,2],[4,2],[2,2],[2,4],   // middle ring, p=8..15
+  [3,5],[4,5],[5,5],[5,4],[5,3],[4,3],[3,3],[3,4],   // inner ring, p=16..23
+];
+const X = c => 40 + (c - 1) * 70;
+const Y = r => 40 + (7 - r) * 70;
+const NAME = p => "abcdefg"[COORD[p][0] - 1] + COORD[p][1];
+
+const svgNS = "http://www.w3.org/2000/svg";
+function el(tag, attrs) {
+  const e = document.createElementNS(svgNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+// --- Client state --------------------------------------------------------
+function initialState() {
+  return { white: [], black: [], turn: "white", whiteHand: 9, blackHand: 9 };
+}
+
+let state = initialState();
+let analysis = null;
+let history = [];
+let pendingFrom = null, pendingTo = null;
+let mode = "white"; // side(s) the HUMAN plays: "white" | "black" | "both"
+let showEval = false;
+let busy = false;
+let localGameOver = null; // set on threefold repetition (server has no notion of this)
+let repetition = new Map();
+
+const boardSvg = document.getElementById("board");
+const statusEl = document.getElementById("status");
+const warnEl = document.getElementById("warn");
+const busyOverlay = document.getElementById("busyOverlay");
+const handRowEl = document.getElementById("handRow");
+const moveListEl = document.getElementById("moveList");
+const evalPanel = document.getElementById("evalPanel");
+const evalCheckbox = document.getElementById("evalCheckbox");
+const undoBtn = document.getElementById("undoBtn");
+const setupText = document.getElementById("setupText");
+
+// --- Networking ------------------------------------------------------------
+
+async function fetchMeta() {
+  try {
+    const res = await fetch("/api/meta");
+    const meta = await res.json();
+    if (!meta.complete) {
+      warnEl.style.display = "block";
+      warnEl.textContent =
+        "Partial database (" + meta.subspaces + " of 49 subspaces loaded) -- placement play is " +
+        "unavailable. Use \"Set up position\" to test movement-phase positions.";
+    } else {
+      warnEl.style.display = "none";
+    }
+  } catch (e) {
+    warnEl.style.display = "block";
+    warnEl.textContent = "Could not reach the server: " + e;
+  }
+}
+
+async function refresh() {
+  busy = true;
+  render();
+  let res;
+  try {
+    res = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state, evaluate: showEval }),
+    });
+  } catch (e) {
+    busy = false;
+    statusEl.textContent = "Request failed: " + e;
+    render();
+    return;
+  }
+  const body = await res.json();
+  busy = false;
+  if (!res.ok) {
+    statusEl.textContent = "Error: " + (body.error || res.status);
+    analysis = null;
+    render();
+    return;
+  }
+  analysis = body;
+  pendingFrom = null;
+  pendingTo = null;
+  render();
+
+  if (!analysis.result && !localGameOver && mode !== "both" && state.turn !== mode && analysis.engineMove != null) {
+    setTimeout(() => applyMove(analysis.moves[analysis.engineMove]), 400);
+  }
+}
+
+// --- Repetition (client-side only; the database already treats a cyclic
+// position as a draw under optimal play, so this is purely about ending a
+// game between imperfect players -- see ui-design.md §4.4) ----------------
+
+function repetitionKey(s) {
+  const w = [...s.white].sort((a, b) => a - b);
+  const b = [...s.black].sort((a, b) => a - b);
+  return JSON.stringify([w, b, s.turn]);
+}
+
+function checkRepetition(newState) {
+  if (newState.whiteHand > 0 || newState.blackHand > 0) return false;
+  const key = repetitionKey(newState);
+  const count = (repetition.get(key) || 0) + 1;
+  repetition.set(key, count);
+  return count >= 3;
+}
+
+function rebuildRepetitionFromHistory() {
+  repetition = new Map();
+  for (const s of history) {
+    if (s.whiteHand === 0 && s.blackHand === 0) {
+      const k = repetitionKey(s);
+      repetition.set(k, (repetition.get(k) || 0) + 1);
+    }
+  }
+  localGameOver = null;
+}
+
+function applyMove(m) {
+  history.push(state);
+  state = m.result;
+  if (checkRepetition(state)) {
+    localGameOver = "Draw by threefold repetition.";
+  }
+  refresh();
+}
+
+// --- Rendering ---------------------------------------------------------
+
+const EVAL_COLOR = { win: "var(--win)", draw: "var(--draw)", loss: "var(--loss)" };
+
+function rank(v) {
+  if (!v) return 500;
+  if (v.outcome === "win") return 0 * 1000 + (v.plies ?? 0);
+  if (v.outcome === "draw") return 1 * 1000;
+  return 2 * 1000 + (1000 - (v.plies ?? 0));
+}
+
+function valueShort(v) {
+  if (!v) return "";
+  if (v.outcome === "draw") return "D";
+  const n = v.plies != null ? v.plies : "";
+  return (v.outcome === "win" ? "W" : "L") + n;
+}
+
+function valueText(v, sideLabel) {
+  if (!v) return "";
+  const n = v.plies != null ? ` in ${v.plies}` : "";
+  if (v.outcome === "draw") return `${sideLabel} to move — draw`;
+  return `${sideLabel} to move — ${v.outcome === "win" ? "wins" : "loses"}${n}`;
+}
+
+function drawBoardLines(svg) {
+  // Three ring polygons.
+  for (let ring = 0; ring < 3; ring++) {
+    const pts = [];
+    for (let i = 0; i < 8; i++) {
+      const p = ring * 8 + i;
+      pts.push(`${X(COORD[p][0])},${Y(COORD[p][1])}`);
+    }
+    svg.appendChild(el("polygon", { points: pts.join(" "), fill: "none", stroke: "var(--line)", "stroke-width": 3 }));
+  }
+  // Four spokes.
+  for (const i of [1, 3, 5, 7]) {
+    const a = COORD[0 * 8 + i], c = COORD[2 * 8 + i];
+    svg.appendChild(el("line", { x1: X(a[0]), y1: Y(a[1]), x2: X(c[0]), y2: Y(c[1]), stroke: "var(--line)", "stroke-width": 3 }));
+  }
+}
+
+function renderBoard() {
+  boardSvg.textContent = "";
+  drawBoardLines(boardSvg);
+
+  // Guard against the brief window between toggling the checkbox and the
+  // corresponding re-fetch resolving: `analysis` may still be the stale,
+  // evaluate:false response (moves with no `value` field) even though
+  // `showEval` has already flipped to true.
+  const moves = analysis ? analysis.moves : [];
+  const evalOn = showEval && analysis && !analysis.result && moves.every(m => "value" in m);
+
+  // Per-point overlay coloring, staged by selection state (ui-design.md §4.3/§4.4).
+  let bestByTo = new Map();   // placement, nothing pending: best value per empty `to`
+  let bestByFrom = new Map(); // movement, nothing selected: best value per stone `from`
+  let byToWhenFrom = new Map(); // movement, pendingFrom set: value(s) per destination
+  let byCaptureWhenPending = new Map(); // capture choice pending: value per capturable stone
+
+  if (evalOn) {
+    if (pendingTo != null) {
+      for (const m of moves) {
+        if (m.capture == null) continue;
+        if (pendingFrom != null && m.from !== pendingFrom) continue;
+        if (m.to !== pendingTo) continue;
+        const cur = byCaptureWhenPending.get(m.capture);
+        if (!cur || rank(m.value) < rank(cur)) byCaptureWhenPending.set(m.capture, m.value);
+      }
+    } else if (pendingFrom != null) {
+      for (const m of moves) {
+        if (m.from !== pendingFrom) continue;
+        const cur = byToWhenFrom.get(m.to);
+        if (!cur || rank(m.value) < rank(cur)) byToWhenFrom.set(m.to, m.value);
+      }
+    } else if (analysis.phase === "placement") {
+      for (const m of moves) {
+        const cur = bestByTo.get(m.to);
+        if (!cur || rank(m.value) < rank(cur)) bestByTo.set(m.to, m.value);
+      }
+    } else {
+      for (const m of moves) {
+        const cur = bestByFrom.get(m.from);
+        if (!cur || rank(m.value) < rank(cur)) bestByFrom.set(m.from, m.value);
+      }
+    }
+  }
+
+  // Selectable destinations / captures for click highlighting (independent of showEval).
+  let destSet = new Set();
+  let captureSet = new Set();
+  if (analysis && !analysis.result) {
+    if (pendingTo != null) {
+      for (const m of moves) {
+        if (m.capture == null) continue;
+        if (pendingFrom != null && m.from !== pendingFrom) continue;
+        if (m.to !== pendingTo) continue;
+        captureSet.add(m.capture);
+      }
+    } else if (pendingFrom != null) {
+      for (const m of moves) if (m.from === pendingFrom) destSet.add(m.to);
+    } else if (analysis.phase === "placement") {
+      for (const m of moves) destSet.add(m.to);
+    } else {
+      // will add per-stone highlight rings for movable stones below
+    }
+  }
+
+  for (let p = 0; p < 24; p++) {
+    const cx = X(COORD[p][0]), cy = Y(COORD[p][1]);
+    const isWhite = state.white.includes(p);
+    const isBlack = state.black.includes(p);
+
+    // Click hit area (generous, invisible).
+    const hit = el("circle", { cx, cy, r: 20, fill: "transparent", style: "cursor:pointer" });
+    hit.addEventListener("click", () => onPointClick(p));
+    boardSvg.appendChild(hit);
+
+    // Evaluation ring/dot underneath the point marker.
+    if (evalOn) {
+      let v = null;
+      if (pendingTo != null) v = byCaptureWhenPending.get(p);
+      else if (pendingFrom != null) v = byToWhenFrom.get(p);
+      else if (analysis.phase === "placement") v = bestByTo.get(p);
+      else v = bestByFrom.get(p);
+      if (v) {
+        const color = EVAL_COLOR[v.outcome];
+        boardSvg.appendChild(el("circle", { cx, cy, r: 13, fill: "none", stroke: color, "stroke-width": 4, "stroke-dasharray": (captureSet.has(p) ? "4 3" : "none") }));
+        if (v.plies != null && (pendingFrom != null || pendingTo != null)) {
+          const t = el("text", { x: cx, y: cy - 16, "text-anchor": "middle", "font-size": 10, fill: color });
+          t.textContent = v.plies;
+          boardSvg.appendChild(t);
+        }
+      }
+    }
+
+    // Selection / candidate highlighting.
+    if (p === pendingFrom) {
+      boardSvg.appendChild(el("circle", { cx, cy, r: 15, fill: "none", stroke: "var(--accent)", "stroke-width": 3 }));
+    }
+    if (destSet.has(p) && !isWhite && !isBlack) {
+      boardSvg.appendChild(el("circle", { cx, cy, r: 5, fill: "var(--accent)" }));
+    }
+    if (captureSet.has(p)) {
+      boardSvg.appendChild(el("circle", { cx, cy, r: 15, fill: "none", stroke: "var(--loss)", "stroke-width": 3, "stroke-dasharray": "4 3" }));
+    }
+
+    // The point marker itself / stone.
+    if (isWhite || isBlack) {
+      boardSvg.appendChild(el("circle", {
+        cx, cy, r: 14,
+        fill: isWhite ? "var(--white-fill)" : "var(--black-fill)",
+        stroke: "var(--stone-stroke)", "stroke-width": 1.5,
+      }));
+    } else {
+      boardSvg.appendChild(el("circle", { cx, cy, r: 4, fill: "var(--line)" }));
+    }
+  }
+
+  // Movement phase, nothing selected: ring the mover's own movable stones.
+  if (evalOn && analysis.phase === "movement" && pendingFrom == null) {
+    for (const [from, v] of bestByFrom) {
+      if (!v) continue;
+      const cx = X(COORD[from][0]), cy = Y(COORD[from][1]);
+      boardSvg.appendChild(el("circle", { cx, cy, r: 17, fill: "none", stroke: EVAL_COLOR[v.outcome], "stroke-width": 3 }));
+    }
+  } else if (!evalOn && analysis && !analysis.result && analysis.phase === "movement" && pendingFrom == null) {
+    const movable = new Set(moves.map(m => m.from));
+    for (const from of movable) {
+      const cx = X(COORD[from][0]), cy = Y(COORD[from][1]);
+      boardSvg.appendChild(el("circle", { cx, cy, r: 17, fill: "none", stroke: "var(--panel-border)", "stroke-width": 2 }));
+    }
+  }
+}
+
+function renderHands() {
+  function dots(color, n) {
+    let s = "";
+    for (let i = 0; i < n; i++) s += `<span class="hand-dot ${color}"></span>`;
+    return s;
+  }
+  handRowEl.innerHTML =
+    `<div>White in hand: ${dots("white", state.whiteHand)}</div>` +
+    `<div>Black in hand: ${dots("black", state.blackHand)}</div>`;
+}
+
+function renderStatus() {
+  let text;
+  let cls = "banner";
+  if (localGameOver) {
+    text = localGameOver;
+    cls += " over draw";
+  } else if (analysis && analysis.result) {
+    const winner = analysis.result.winner === "white" ? "White" : "Black";
+    const reason = analysis.result.reason === "fewerThanThree" ? "opponent has fewer than three stones" : "opponent has no legal move";
+    text = `${winner} wins (${reason}).`;
+    cls += " over " + (winner === "White" ? "win" : "loss");
+  } else {
+    const mover = state.turn === "white" ? "White" : "Black";
+    text = `${analysis && analysis.phase === "placement" ? "Placement" : "Movement"} phase. ${mover} to move.`;
+    if (showEval && analysis && analysis.value) {
+      text += " — " + valueText(analysis.value, mover);
+      cls += " " + analysis.value.outcome;
+    }
+  }
+  statusEl.textContent = text;
+  statusEl.className = cls;
+}
+
+function renderMoveList() {
+  if (!showEval || !analysis || analysis.result) {
+    evalPanel.style.display = "none";
+    return;
+  }
+  evalPanel.style.display = "block";
+  moveListEl.innerHTML = "";
+  const moves = analysis.moves
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => rank(a.m.value) - rank(b.m.value));
+  for (const { m, i } of moves) {
+    const li = document.createElement("li");
+    if (i === analysis.engineMove) li.classList.add("engine");
+    const label = document.createElement("span");
+    label.textContent = (i === analysis.engineMove ? "★ " : "") + m.notation;
+    const val = document.createElement("span");
+    val.className = "val " + (m.value ? m.value.outcome : "");
+    val.textContent = valueShort(m.value);
+    li.appendChild(label);
+    li.appendChild(val);
+    li.addEventListener("click", () => {
+      if (busy || localGameOver) return;
+      if (mode !== "both" && state.turn !== mode) return;
+      applyMove(m);
+    });
+    moveListEl.appendChild(li);
+  }
+}
+
+function render() {
+  renderBoard();
+  renderHands();
+  renderStatus();
+  renderMoveList();
+  busyOverlay.style.display = busy ? "flex" : "none";
+  undoBtn.disabled = busy || history.length === 0;
+}
+
+// --- Interaction -----------------------------------------------------------
+
+function resetSelection() {
+  pendingFrom = null;
+  pendingTo = null;
+  render();
+}
+
+function candidatesFor(p, stage) {
+  if (!analysis) return [];
+  let ms = analysis.moves;
+  if (stage === "capture") {
+    if (pendingFrom != null) ms = ms.filter(m => m.from === pendingFrom);
+    return ms.filter(m => m.to === pendingTo && m.capture === p);
+  }
+  if (analysis.phase === "placement") {
+    return ms.filter(m => m.to === p);
+  }
+  if (pendingFrom == null) {
+    return ms.filter(m => m.from === p);
+  }
+  return ms.filter(m => m.from === pendingFrom && m.to === p);
+}
+
+function onPointClick(p) {
+  if (busy || !analysis || analysis.result || localGameOver) return;
+  if (mode !== "both" && state.turn !== mode) return;
+
+  if (pendingTo != null) {
+    const matches = candidatesFor(p, "capture");
+    if (matches.length === 1) applyMove(matches[0]);
+    else resetSelection();
+    return;
+  }
+
+  if (analysis.phase === "movement" && pendingFrom == null) {
+    const asFrom = analysis.moves.filter(m => m.from === p);
+    if (asFrom.length > 0) {
+      pendingFrom = p;
+      render();
+      return;
+    }
+    return; // clicked something that isn't a movable stone; ignore
+  }
+
+  const matches = candidatesFor(p, "dest");
+  if (matches.length === 1) {
+    applyMove(matches[0]);
+  } else if (matches.length > 1) {
+    pendingTo = p;
+    render();
+  } else {
+    resetSelection();
+  }
+}
+
+document.getElementById("newGameBtn").addEventListener("click", () => {
+  state = initialState();
+  history = [];
+  repetition = new Map();
+  localGameOver = null;
+  refresh();
+});
+
+undoBtn.addEventListener("click", () => {
+  if (busy || history.length === 0) return;
+  const engineOwnsCurrentTurn = mode !== "both" && state.turn !== mode;
+  state = history.pop();
+  if (engineOwnsCurrentTurn && history.length > 0) {
+    state = history.pop();
+  }
+  rebuildRepetitionFromHistory();
+  refresh();
+});
+
+for (const radio of document.querySelectorAll('input[name="mode"]')) {
+  radio.addEventListener("change", (e) => {
+    mode = e.target.value;
+    refresh();
+  });
+}
+
+evalCheckbox.addEventListener("change", (e) => {
+  showEval = e.target.checked;
+  refresh();
+});
+
+document.getElementById("loadBtn").addEventListener("click", () => {
+  let parsed;
+  try {
+    parsed = JSON.parse(setupText.value);
+  } catch (e) {
+    statusEl.textContent = "Invalid JSON: " + e;
+    return;
+  }
+  state = {
+    white: parsed.white || [],
+    black: parsed.black || [],
+    turn: parsed.turn || "white",
+    whiteHand: parsed.whiteHand || 0,
+    blackHand: parsed.blackHand || 0,
+  };
+  history = [];
+  repetition = new Map();
+  localGameOver = null;
+  refresh();
+});
+
+setupText.value = JSON.stringify(initialState(), null, 1);
+
+fetchMeta();
+refresh();
+</script>
