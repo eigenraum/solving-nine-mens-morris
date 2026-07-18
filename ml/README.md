@@ -70,6 +70,18 @@ budget (a cosine LR schedule is fit to it), `--batch-size` (default 8192),
 Checkpoints (`*.pt`) are gitignored — every model here is reproducible from the
 database.
 
+**Logging**: by default metrics only go to stdout. Pass `--logdir runs/<name>` to
+also write TensorBoard event files (same stats as the console — train loss/accuracy/
+cross-entropy/depth-MSE/LR/throughput plus the validation metrics, keyed by samples
+seen so runs with different batch sizes stay comparable), then view with:
+
+```sh
+uv run tensorboard --logdir runs
+```
+
+The `tensorboard` package is in the `dev` extra; without `--logdir` it is never
+imported. `runs/` is gitignored.
+
 The shipping-model recipe — an S/M/L × sample-budget grid on the full database,
 judged on blunder rate and soak matches per `../design-nn.md` §8 — is milestone N7
 and has **not** been run yet; `RESULTS-nn.md` records a demo-scale config-M

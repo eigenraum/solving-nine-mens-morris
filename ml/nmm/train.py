@@ -72,7 +72,14 @@ def train(
     log_every: int = 20,
     val_every: int = 200,
     only_pairs: list[tuple[int, int]] | None = None,
+    logdir: str | None = None,
 ) -> NmmNet:
+    writer = None
+    if logdir:
+        from torch.utils.tensorboard.writer import SummaryWriter
+
+        writer = SummaryWriter(logdir)
+
     model = NmmNet.from_config(config).to(device)
     n_steps = max(1, math.ceil(n_samples / batch_size))
 
@@ -113,9 +120,20 @@ def train(
                 f"acc={stats['acc']:.4f} ce={stats['ce']:.4f} mse={stats['mse']:.4f} "
                 f"lr={sched.get_last_lr()[0]:.2e} rate={rate:.0f}/s"
             )
+            if writer:
+                writer.add_scalar("train/loss", loss.item(), n_seen)
+                writer.add_scalar("train/acc", stats["acc"], n_seen)
+                writer.add_scalar("train/ce", stats["ce"], n_seen)
+                writer.add_scalar("train/mse", stats["mse"], n_seen)
+                writer.add_scalar("train/lr", sched.get_last_lr()[0], n_seen)
+                writer.add_scalar("train/samples_per_sec", rate, n_seen)
         if step % val_every == 0:
             val_stats = evaluate_val(model, val_loader, device, n_batches=5)
             print(f"  [val] {val_stats}")
+            if writer:
+                writer.add_scalar("val/acc", val_stats["val_acc"], n_seen)
+                writer.add_scalar("val/ce", val_stats["val_ce"], n_seen)
+                writer.add_scalar("val/mse", val_stats["val_mse"], n_seen)
 
     if out_path:
         torch.save(
@@ -129,6 +147,9 @@ def train(
             out_path,
         )
         print(f"saved checkpoint to {out_path}")
+
+    if writer:
+        writer.close()
 
     return model
 
@@ -148,6 +169,12 @@ def main():
     p.add_argument("--out", default=None)
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--val-every", type=int, default=200)
+    p.add_argument(
+        "--logdir",
+        default=None,
+        help="TensorBoard log directory, e.g. runs/M_3e8 (needs the tensorboard "
+        "package; logs the same stats as the console, keyed by samples seen)",
+    )
     p.add_argument(
         "--only-pairs",
         default=None,
@@ -177,6 +204,7 @@ def main():
         log_every=args.log_every,
         val_every=args.val_every,
         only_pairs=only_pairs,
+        logdir=args.logdir,
     )
 
 
