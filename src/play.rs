@@ -9,7 +9,6 @@ use crate::movegen;
 use crate::opening::{self, PlacementState};
 use crate::pos::Position;
 use crate::retro::{self, Database};
-use std::collections::HashMap;
 
 /// The result of choosing a move: the chosen successor and the
 /// game-theoretic value of the position it came from, for display.
@@ -72,7 +71,7 @@ pub fn best_movement_move(pos: Position, db: &Database) -> Option<Choice<Positio
 pub fn best_placement_move(
     state: &PlacementState,
     db: &Database,
-    tt: &mut HashMap<(Position, u8, u8), i8>,
+    tt: &mut opening::Tt,
 ) -> Option<PlacementState> {
     let succs = opening::successors(state);
     if succs.is_empty() {

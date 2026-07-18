@@ -95,6 +95,33 @@ mid-game).
   choose which enemy stone to remove.
 - Pass `--human black` to play second.
 
+## Build the opening cache
+
+`play`, `serve`, and `solve-opening` all run the same 18-ply opening search (see
+`design-opening-phase.md`), and by default each one starts from an empty
+transposition table — every fresh invocation redoes the same shallow, most-revisited
+part of the search from scratch. `build-opening-cache` persists the shallow entries
+from one search to `db/opening_cache.bin`, which every later invocation loads
+automatically to pre-populate its table before searching:
+
+```sh
+./target/release/ninemm build-opening-cache --dir db
+```
+
+- Requires the **complete** 49-subspace database, same as `play`/`solve-opening`.
+- `--max-ply <n>` (default `8`, matching Gasser's own "intermediate database" cutoff)
+  controls how deep into the placement tree cached entries are kept; shallower
+  positions are revisited far more often across different games, so lower `--max-ply`
+  trades a smaller file for less coverage.
+- Prints the entry count, file size, and wall-clock time when done.
+- **Zero effect on search results** — only speed. If `db/opening_cache.bin` is
+  missing, stale (the movement-phase database changed since it was built — detected
+  automatically via a checksum-based fingerprint over the manifest), or corrupt, every
+  consumer silently falls back to an empty table and logs why; nothing errors out.
+- Safe to delete at any time (`rm db/opening_cache.bin`) or rebuild after a re-solve
+  (`ninemm solve` followed by `ninemm build-opening-cache` picks up the change; a
+  stale cache left in place is simply ignored, not served incorrectly).
+
 ## Browser UI
 
 A browser-based alternative to `play`, with an optional evaluation overlay (see
