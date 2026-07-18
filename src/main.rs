@@ -73,6 +73,11 @@ enum Commands {
         /// embedded at compile time (edit-reload development loop).
         #[arg(long)]
         ui_dir: Option<PathBuf>,
+        /// Directory with the built web runtime (dist/ + export/), enabling
+        /// the in-browser neural engine in the UI. The default picks it up
+        /// automatically when serving from the repository root.
+        #[arg(long, default_value = "web")]
+        web_dir: PathBuf,
     },
 }
 
@@ -150,6 +155,7 @@ fn main() -> anyhow::Result<()> {
             allow_partial,
             warm,
             ui_dir,
+            web_dir,
         } => {
             ninemm::server::serve(
                 &dir,
@@ -158,6 +164,7 @@ fn main() -> anyhow::Result<()> {
                     allow_partial,
                     warm,
                     ui_dir,
+                    web_dir,
                 },
             )?;
         }

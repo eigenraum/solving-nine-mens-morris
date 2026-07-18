@@ -76,7 +76,11 @@ src/
   play.rs        perfect-play move selection + self-play soak test
   server.rs      HTTP server for the browser UI: JSON analysis API over the database
   main.rs        CLI: board | stats | solve | verify | db-stats | play | serve
-ui/index.html         browser UI: board, play, and evaluation overlay (single file)
+ui/index.html         the one browser UI: board, play, evaluation overlay; drives either
+                      engine backend (exact database via /api, or the neural net in-browser)
+ml/                   Python: dataset, training, and export of the compressing value network
+web/                  TypeScript: in-browser rules + NN engine; provider.ts adapts it to the
+                      same analysis contract as server.rs, so ui/index.html can use both
 design.md            architecture and rationale
 implementation.md    milestone-by-milestone build plan
 getting-started.md   build, run, reproduce

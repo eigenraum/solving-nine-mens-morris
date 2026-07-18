@@ -5,6 +5,16 @@ perfect-play engine, driven by the solved database produced by `ninemm solve`, w
 optional **evaluation overlay**: when a checkbox is set, the UI shows the
 game-theoretic value of the current position and of every legal move.
 
+> **Update (post NN merge):** `ui/index.html` is now the *single* frontend for both
+> engines. Besides the exact-database backend described here, it can drive the
+> in-browser neural engine (`web/src/provider.ts` adapts `web/src/engine.ts` to the
+> same `AnalyzeResponse` wire shape as `/api/analyze`, plus an optional `wdl`
+> probability field per value). The page probes `/api/meta` and `/nn/provider.js` +
+> `/export/` at startup and offers whichever backends respond; `ninemm serve`
+> exposes the neural assets via `--web-dir`, and `web/scripts/serve.mjs` serves the
+> same page with only the neural backend. Everything below about the exact backend
+> and the client's interaction model is unchanged.
+
 This document is the "why and what". The step-by-step build plan for implementing it
 is in [`ui-implementation.md`](ui-implementation.md). Background reading, in order:
 [`readme-database.md`](readme-database.md) (value encoding, side-to-move convention),

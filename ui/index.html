@@ -1,3 +1,4 @@
+<meta charset="utf-8">
 <title>Nine Men's Morris</title>
 <style>
   :root {
@@ -54,6 +55,9 @@
   .board-col { flex: 0 0 480px; max-width: 100%; }
   .panel-col { flex: 1 1 320px; min-width: 280px; }
   #board { width: 100%; max-width: 480px; height: auto; display: block; }
+  /* Only the invisible hit circles take clicks; stones, markers, and
+     overlay rings drawn on top of them must not swallow the event. */
+  #board *:not(.hit) { pointer-events: none; }
   .banner {
     font-size: 1rem;
     padding: 0.5rem 0.75rem;
@@ -120,7 +124,12 @@
   #moveList li:last-child { border-bottom: none; }
   #moveList li:hover { background: var(--panel-bg); }
   #moveList li.engine { font-weight: 700; }
-  #moveList .val { font-variant-numeric: tabular-nums; }
+  #moveList .val { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bar { display: flex; flex: 1 1 auto; max-width: 140px; height: 10px; border-radius: 3px; overflow: hidden; background: var(--panel-bg); border: 1px solid var(--panel-border); }
+  .bar-loss { background: var(--loss); }
+  .bar-draw { background: var(--draw); }
+  .bar-win { background: var(--win); }
+  .note { font-size: 0.8rem; opacity: 0.75; margin: 0.25rem 0 0.5rem 0; }
   .val.win { color: var(--win); }
   .val.draw { color: var(--draw); }
   .val.loss { color: var(--loss); }
@@ -155,6 +164,15 @@
   </div>
 
   <div class="panel-col">
+    <fieldset id="engineFieldset">
+      <legend>Engine</legend>
+      <div class="row">
+        <label><input type="radio" name="engine" value="exact" disabled> Exact database</label>
+        <label><input type="radio" name="engine" value="neural" disabled> Neural net (in browser)</label>
+      </div>
+      <div id="engineNote" class="note"></div>
+    </fieldset>
+
     <fieldset>
       <legend>Game</legend>
       <div class="row">
@@ -230,12 +248,58 @@ const evalCheckbox = document.getElementById("evalCheckbox");
 const undoBtn = document.getElementById("undoBtn");
 const setupText = document.getElementById("setupText");
 
-// --- Networking ------------------------------------------------------------
+// --- Engine backends -------------------------------------------------------
+// One frontend, two interchangeable analysis providers with the same wire
+// shape (src/server.rs's AnalyzeResponse):
+//   "exact"  -- POST /api/analyze against the solved database (ninemm serve)
+//   "neural" -- the in-browser network engine (web/dist, loaded dynamically)
+// Neural values additionally carry `wdl` probabilities; the UI renders bars
+// for those and exact W/D/L-with-plies text otherwise.
 
-async function fetchMeta() {
+const backends = { exact: null, neural: null }; // exact: /api/meta body; neural: NeuralEngine
+let engine = null; // "exact" | "neural" | null
+
+async function detectBackends() {
   try {
     const res = await fetch("/api/meta");
-    const meta = await res.json();
+    if (res.ok) backends.exact = await res.json();
+  } catch (e) { /* no analysis server behind this page */ }
+  try {
+    const mod = await import("/nn/provider.js");
+    backends.neural = await mod.createNeuralEngine("/export");
+  } catch (e) {
+    console.warn("neural engine unavailable (no /nn assets or /export model):", e);
+  }
+  // Prefer the exact database when it is complete, else the network, else
+  // whatever movement-phase-only partial database is there.
+  engine = backends.exact && backends.exact.complete ? "exact"
+    : backends.neural ? "neural"
+    : backends.exact ? "exact"
+    : null;
+
+  for (const radio of document.querySelectorAll('input[name="engine"]')) {
+    radio.disabled = !backends[radio.value];
+    radio.checked = radio.value === engine;
+  }
+  renderEngineInfo();
+}
+
+function renderEngineInfo() {
+  const noteEl = document.getElementById("engineNote");
+  if (engine === null) {
+    noteEl.textContent = "No engine available.";
+    warnEl.style.display = "block";
+    warnEl.textContent =
+      "Neither backend is available: no analysis server (/api) and no neural " +
+      "model (/nn + /export). Start `ninemm serve` and/or build the web " +
+      "runtime (`npm run build` in web/) and export a model.";
+    return;
+  }
+  if (engine === "exact") {
+    const meta = backends.exact;
+    noteEl.textContent = meta.complete
+      ? "Perfect play from the solved database (all 49 subspaces)."
+      : "Partial database (" + meta.subspaces + " of 49 subspaces).";
     if (!meta.complete) {
       warnEl.style.display = "block";
       warnEl.textContent =
@@ -244,36 +308,51 @@ async function fetchMeta() {
     } else {
       warnEl.style.display = "none";
     }
-  } catch (e) {
+  } else {
+    const m = backends.neural.meta();
+    noteEl.textContent =
+      "Compressed value network (" + m.hidden + "×" + m.nBlocks + " residual MLP), " +
+      "shallow search + symmetry averaging. Runs entirely in this page.";
     warnEl.style.display = "block";
-    warnEl.textContent = "Could not reach the server: " + e;
+    warnEl.textContent =
+      "Neural engine: evaluations are network predictions, not exact values. " +
+      "The opening (placement) is played by a heuristic, not the model (design-nn.md §10).";
   }
+}
+
+async function analyzeState(evaluate) {
+  if (engine === "exact") {
+    const res = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state, evaluate }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || String(res.status));
+    return body;
+  }
+  if (engine === "neural") {
+    // Let the busy overlay paint before the (synchronous) evaluation work.
+    await new Promise((r) => setTimeout(r, 20));
+    return backends.neural.analyze(state, evaluate);
+  }
+  throw new Error("no engine available");
 }
 
 async function refresh() {
   busy = true;
   render();
-  let res;
+  let body;
   try {
-    res = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...state, evaluate: showEval }),
-    });
+    body = await analyzeState(showEval);
   } catch (e) {
     busy = false;
-    statusEl.textContent = "Request failed: " + e;
-    render();
-    return;
-  }
-  const body = await res.json();
-  busy = false;
-  if (!res.ok) {
-    statusEl.textContent = "Error: " + (body.error || res.status);
     analysis = null;
     render();
+    statusEl.textContent = "Error: " + (e && e.message ? e.message : e);
     return;
   }
+  busy = false;
   analysis = body;
   pendingFrom = null;
   pendingTo = null;
@@ -328,13 +407,25 @@ const EVAL_COLOR = { win: "var(--win)", draw: "var(--draw)", loss: "var(--loss)"
 
 function rank(v) {
   if (!v) return 500;
+  if (v.wdl) {
+    // Probabilistic (neural) value: higher win prob first, draw prob breaks ties.
+    return (1 - v.wdl[2]) * 1000 + (1 - v.wdl[1]) * 10;
+  }
   if (v.outcome === "win") return 0 * 1000 + (v.plies ?? 0);
   if (v.outcome === "draw") return 1 * 1000;
   return 2 * 1000 + (1000 - (v.plies ?? 0));
 }
 
+function pct(x) {
+  return Math.round(x * 100) + "%";
+}
+
 function valueShort(v) {
   if (!v) return "";
+  if (v.wdl) {
+    const idx = v.outcome === "loss" ? 0 : v.outcome === "draw" ? 1 : 2;
+    return v.outcome[0].toUpperCase() + " " + pct(v.wdl[idx]);
+  }
   if (v.outcome === "draw") return "D";
   const n = v.plies != null ? v.plies : "";
   return (v.outcome === "win" ? "W" : "L") + n;
@@ -342,9 +433,12 @@ function valueShort(v) {
 
 function valueText(v, sideLabel) {
   if (!v) return "";
+  if (v.wdl) {
+    return `net: win ${pct(v.wdl[2])} / draw ${pct(v.wdl[1])} / loss ${pct(v.wdl[0])}`;
+  }
   const n = v.plies != null ? ` in ${v.plies}` : "";
-  if (v.outcome === "draw") return `${sideLabel} to move — draw`;
-  return `${sideLabel} to move — ${v.outcome === "win" ? "wins" : "loses"}${n}`;
+  if (v.outcome === "draw") return "draw with perfect play";
+  return `${sideLabel} ${v.outcome === "win" ? "wins" : "loses"}${n}`;
 }
 
 function drawBoardLines(svg) {
@@ -435,7 +529,7 @@ function renderBoard() {
     const isBlack = state.black.includes(p);
 
     // Click hit area (generous, invisible).
-    const hit = el("circle", { cx, cy, r: 20, fill: "transparent", style: "cursor:pointer" });
+    const hit = el("circle", { cx, cy, r: 20, fill: "transparent", class: "hit", style: "cursor:pointer" });
     hit.addEventListener("click", () => onPointClick(p));
     boardSvg.appendChild(hit);
 
@@ -451,7 +545,8 @@ function renderBoard() {
         boardSvg.appendChild(el("circle", { cx, cy, r: 13, fill: "none", stroke: color, "stroke-width": 4, "stroke-dasharray": (captureSet.has(p) ? "4 3" : "none") }));
         if (v.plies != null && (pendingFrom != null || pendingTo != null)) {
           const t = el("text", { x: cx, y: cy - 16, "text-anchor": "middle", "font-size": 10, fill: color });
-          t.textContent = v.plies;
+          t.textContent = (v.wdl ? "~" : "") + v.plies; // wdl = predicted depth, not exact
+
           boardSvg.appendChild(t);
         }
       }
@@ -472,6 +567,7 @@ function renderBoard() {
     if (isWhite || isBlack) {
       boardSvg.appendChild(el("circle", {
         cx, cy, r: 14,
+        class: isWhite ? "stone stone-w" : "stone stone-b",
         fill: isWhite ? "var(--white-fill)" : "var(--black-fill)",
         stroke: "var(--stone-stroke)", "stroke-width": 1.5,
       }));
@@ -549,6 +645,19 @@ function renderMoveList() {
     val.className = "val " + (m.value ? m.value.outcome : "");
     val.textContent = valueShort(m.value);
     li.appendChild(label);
+    if (m.value && m.value.wdl) {
+      // Neural value: loss/draw/win probability bar (in board-orientation
+      // order loss..win so red is always left, green always right).
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      for (const [cls, p] of [["bar-loss", m.value.wdl[0]], ["bar-draw", m.value.wdl[1]], ["bar-win", m.value.wdl[2]]]) {
+        const seg = document.createElement("div");
+        seg.className = cls;
+        seg.style.width = (p * 100) + "%";
+        bar.appendChild(seg);
+      }
+      li.appendChild(bar);
+    }
     li.appendChild(val);
     li.addEventListener("click", () => {
       if (busy || localGameOver) return;
@@ -655,6 +764,14 @@ evalCheckbox.addEventListener("change", (e) => {
   refresh();
 });
 
+for (const radio of document.querySelectorAll('input[name="engine"]')) {
+  radio.addEventListener("change", (e) => {
+    engine = e.target.value;
+    renderEngineInfo();
+    refresh(); // same game state, re-analyzed by the newly selected backend
+  });
+}
+
 document.getElementById("loadBtn").addEventListener("click", () => {
   let parsed;
   try {
@@ -678,6 +795,5 @@ document.getElementById("loadBtn").addEventListener("click", () => {
 
 setupText.value = JSON.stringify(initialState(), null, 1);
 
-fetchMeta();
-refresh();
+detectBackends().then(refresh);
 </script>
